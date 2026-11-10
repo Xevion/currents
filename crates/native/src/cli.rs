@@ -33,7 +33,7 @@ pub(crate) struct Common {
     #[arg(long, default_value_t = 0.4, global = true)]
     pub(crate) speed: f32,
     /// Supersampling factor per axis
-    #[arg(long, default_value_t = 2, global = true)]
+    #[arg(long, default_value_t = 1, global = true)]
     pub(crate) ss: u32,
     /// Output pixels per flow field texel; above 1 trades the stream's thinnest filaments for speed
     #[arg(long, default_value_t = 1, global = true)]

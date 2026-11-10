@@ -4,9 +4,8 @@ use currents_core::viewer::{Budget, Settings};
 use web_sys::UrlSearchParams;
 
 const SPEED: f32 = 0.4;
-/// Below 2 the stripe edges alias and shimmer as they drift. Only the shade pass scales with
-/// it, and the field pass costs more than that, so 2 adds well under half to a frame.
-const SUPERSAMPLING: u32 = 2;
+/// The shade pass averages over each pixel itself, and a factor of 2 costs it four times as much.
+const SUPERSAMPLING: u32 = 1;
 /// Pixels shaded per frame before the render scale is applied; phones and laptops share
 /// their GPU with the compositor, so this sits well under a large desktop window.
 const MAX_PIXELS: f64 = 3_686_400.0;
