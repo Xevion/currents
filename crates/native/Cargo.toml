@@ -9,14 +9,21 @@ clap.workspace = true
 currents-core = { workspace = true, features = ["native-backends"] }
 image.workspace = true
 pollster.workspace = true
+rayon = "1.12.0"
 snafu.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+webpx = { version = "0.4.1", features = ["animation"] }
 wgpu.workspace = true
 
 [dev-dependencies]
 assert2.workspace = true
+divan = "0.1.21"
 rstest.workspace = true
+
+[[bench]]
+name = "export"
+harness = false
 
 [lints]
 workspace = true

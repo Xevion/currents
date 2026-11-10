@@ -1,7 +1,7 @@
 // `sample_field(p)`, the field filtered at a shade-pixel position, is appended by the renderer
 // in the form the device supports.
-@group(0) @binding(1) var field: texture_2d<f32>;
-@group(0) @binding(2) var smp: sampler;
+@group(0) @binding(3) var field: texture_2d<f32>;
+@group(0) @binding(4) var smp: sampler;
 
 fn blob(d: vec2f, amp: f32, c: vec2f, rot: vec2f, inv: vec2f) -> f32 {
     let q = d - c;
@@ -44,13 +44,18 @@ const GRAIN_PERIOD = 0.4;                      // grain refresh period for the m
 
 // Grain of a fixed physical size (cell in ref px), about unit spread, two octaves. Zooming
 // magnifies it; fpx (ref px per shaded px) fades out each octave before it nears two
-// displayed pixels per cycle, where it would shimmer as it drifts.
+// displayed pixels per cycle, where it would shimmer as it drifts. An octave that has faded
+// out is not evaluated, which is most of the grain's cost once the picture is minified.
 fn grain(p: vec2f, cell: f32, fpx: f32) -> f32 {
     let q = p / cell;
-    let k = fpx * u.field_scale / cell;
-    let a = gradient_noise(q).x * (1.0 - smoothstep(0.4, 0.625, k));
-    let b = gradient_noise(q * 2.13 + 7.3).x * 0.55 * (1.0 - smoothstep(0.4, 0.625, 2.13 * k));
-    return (a + b) * 4.4;
+    let k = fpx * u.supersampling / cell;
+    let fa = 1.0 - smoothstep(0.4, 0.625, k);
+    let fb = 1.0 - smoothstep(0.4, 0.625, 2.13 * k);
+    var n = 0.0;
+    let stride = fpx / cell;
+    if (fa > 0.0) { n = gradient_noise_spaced(q, stride).x * fa; }
+    if (fb > 0.0) { n += gradient_noise_spaced(q * 2.13 + 7.3, 2.13 * stride).x * 0.55 * fb; }
+    return n * 4.4;
 }
 
 // Grain carried by the liquid at screen velocity v: two copies drift with it and take turns,
@@ -316,11 +321,12 @@ fn spray_fade(col_in: vec3f, pix: Pixel) -> vec3f {
         let cpp = px / glen;   // output px per stripe period
         let mq = vec2f(m, c);
         // mottle octaves fade out by the displayed pixels per cycle, as the grain does
-        let dpp = cpp / u.field_scale;
+        let dpp = cpp / u.supersampling;
         let vis1 = smoothstep(1.6, 2.5, dpp / 2.6);
         let vis2 = smoothstep(1.6, 2.5, dpp / 5.7);
-        let big = gradient_noise(mq * 0.13 + 2.0).x * 3.0 + gradient_noise(mq * 0.45 - 7.0).x * 1.5;
-        let sp = (gradient_noise(mq * 2.6 + 11.0).x * vis1 + 0.7 * gradient_noise(mq * 5.7 - 3.0).x * vis2) * 3.4 + 0.5 * gfine;
+        let ppp = 1.0 / cpp;   // stripe periods per shaded px
+        let big = gradient_noise_spaced(mq * 0.13 + 2.0, 0.13 * ppp).x * 3.0 + gradient_noise_spaced(mq * 0.45 - 7.0, 0.45 * ppp).x * 1.5;
+        let sp = (gradient_noise_spaced(mq * 2.6 + 11.0, 2.6 * ppp).x * vis1 + 0.7 * gradient_noise_spaced(mq * 5.7 - 3.0, 5.7 * ppp).x * vis2) * 3.4 + 0.5 * gfine;
         let fe = fd + (0.055 + P(P_SPRAY_MOTTLE)) * big;
         let painted = smoothstep(0.0, 0.62, fe);
         let thr = (0.5 - painted) * 2.4;
@@ -373,8 +379,18 @@ fn ball_surface(pix: Pixel, scn: Scene, ball: Ball) -> BallSurface {
     // toward the rim the surface is squeezed past what the pixels can hold, so the grain
     // there is laid on the image instead
     let onsurf = smoothstep(0.12, 0.4, bz);
-    let gb = mix(grain(gp, 1.5, fpx), (swn.x * grain(tx, 1.5, bfpx) + swn.y * grain(ty, 1.5, bfpx) + swn.z * grain(tz, 1.5, bfpx)) * wn, onsurf);
-    let gc = mix(grain(gp, 4.0, fpx), (swn.x * grain(tx, 4.0, bfpx) + swn.y * grain(ty, 4.0, bfpx) + swn.z * grain(tz, 4.0, bfpx)) * wn, onsurf);
+    // fine and coarse grain: laid on the image, and wrapped on the surface
+    var flat = vec2f(0.0);
+    var wrapped = vec2f(0.0);
+    if (onsurf < 1.0) {
+        flat = vec2f(grain(gp, 1.5, fpx), grain(gp, 4.0, fpx));
+    }
+    if (onsurf > 0.0) {
+        wrapped = vec2f(swn.x * grain(tx, 1.5, bfpx) + swn.y * grain(ty, 1.5, bfpx) + swn.z * grain(tz, 1.5, bfpx),
+                        swn.x * grain(tx, 4.0, bfpx) + swn.y * grain(ty, 4.0, bfpx) + swn.z * grain(tz, 4.0, bfpx)) * wn;
+    }
+    let gb = mix(flat.x, wrapped.x, onsurf);
+    let gc = mix(flat.y, wrapped.y, onsurf);
 
     var surf: BallSurface;
     surf.height = bz;
@@ -548,13 +564,16 @@ fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec
     var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);
     if (P(P_DEBUG_BALL_OUTLINE) > 0.5) { cov *= 0.35; }
     col = mix(col, scol2, cov);
-    let ride = smoothstep(-0.3, 0.5, gradient_noise(vec2f(m * 0.8, 3.3)).x * 1.6 + 0.5 * gradient_noise(vec2f(m * 2.6, 9.1)).x);
     let facing = 0.3 + 0.7 * smoothstep(-0.5, 0.6, dot(-gh, LIGHT));
-    let crest = exp(-pow((wl - 1.3) / 0.75, 2.0));
-    let sheen = exp(-pow((wl - 2.8) / 1.6, 2.0));
     let lip = side * (1.0 - cov) * facing;
-    col = mix(col, rgb255(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
-    col += rgb255(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
+    if (lip > 0.0) {
+        let ppp = glen / px;   // stripe periods per shaded px
+        let ride = smoothstep(-0.3, 0.5, gradient_noise_spaced(vec2f(m * 0.8, 3.3), 0.8 * ppp).x * 1.6 + 0.5 * gradient_noise_spaced(vec2f(m * 2.6, 9.1), 2.6 * ppp).x);
+        let crest = exp(-pow((wl - 1.3) / 0.75, 2.0));
+        let sheen = exp(-pow((wl - 2.8) / 1.6, 2.0));
+        col = mix(col, rgb255(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
+        col += rgb255(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
+    }
     if (P(P_DEBUG_BALL_OUTLINE) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
     return col;
 }

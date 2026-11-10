@@ -11,9 +11,9 @@ const SUPERSAMPLING: u32 = 2;
 /// their GPU with the compositor, so this sits well under a large desktop window.
 const MAX_PIXELS: f64 = 3_686_400.0;
 
-/// Settings from the page URL: `speed`, `ss`, `p=INDEX=VALUE` (repeatable), `pixels` (the
-/// budget), `scale` (a fixed render scale, which turns off adapting it to the frame rate) and
-/// `debug` (a field view to start in).
+/// Settings from the page URL: `speed`, `ss`, `field` (output pixels per flow field texel),
+/// `p=INDEX=VALUE` (repeatable), `pixels` (the budget), `scale` (a fixed render scale, which
+/// turns off adapting it and the field to the frame rate) and `debug` (a field view to start in).
 pub(crate) fn from_url() -> Settings {
     let params =
         web_sys::window().and_then(|w| w.location().search().ok()).and_then(|s| UrlSearchParams::new_with_str(&s).ok());
@@ -29,6 +29,7 @@ pub(crate) fn from_url() -> Settings {
         sources: Sources::embedded(),
         speed: number("speed").map_or(SPEED, |v| v as f32),
         supersampling: number("ss").map_or(SUPERSAMPLING, |v| v.clamp(1.0, 4.0) as u32),
+        field_step: number("field").map_or(1, |v| v.clamp(1.0, 4.0) as u32),
         params: ParamOverride::pack(&overrides),
         budget: Some(Budget {
             max_pixels: number("pixels").filter(|&v| v >= 1.0).unwrap_or(MAX_PIXELS),

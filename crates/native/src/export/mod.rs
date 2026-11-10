@@ -1,46 +1,106 @@
-mod downsample;
+pub mod downsample;
+pub mod encode;
 mod readback;
 mod reference;
+mod sink;
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use std::{fs, io};
-
-use downsample::downsample;
-use readback::Readback;
-use reference::Reference;
-use snafu::{ResultExt, Snafu, ensure};
 
 use currents_core::gpu::{self, Gpu};
 use currents_core::renderer::{PassTimes, Renderer, Uniforms};
 use currents_core::shaders;
+use downsample::downsample;
+use encode::{Encoding, Format};
+use readback::Readback;
+use reference::Reference;
+use sink::Sink;
+use snafu::{ResultExt, Snafu, ensure};
 
 use crate::cli::{Common, OutputSize, RenderArgs};
 
 const COVER: &str = "references/stills/cover-apple-3000.jpg";
 
 #[derive(Debug, Snafu)]
-pub(crate) enum Error {
+pub enum Error {
     #[snafu(display("could not open a graphics device"))]
     Gpu { source: gpu::Error },
     #[snafu(display("could not load the shaders"))]
     Shaders { source: shaders::Error },
     #[snafu(display("an output size of {width}x{height} has no pixels to render"))]
     EmptyOutput { width: u32, height: u32 },
+    #[snafu(display("--lossless applies to WebP, and the output is {format}"))]
+    LosslessFormat { format: Format },
     #[snafu(display("reading the rendered frame back from the GPU failed"))]
     Readback { source: wgpu::BufferAsyncError },
     #[snafu(display("could not read the cover image {}", path.display()))]
     OpenCover { path: PathBuf, source: image::ImageError },
     #[snafu(display("could not create the directory {}", path.display()))]
     CreateDir { path: PathBuf, source: io::Error },
+    #[snafu(display("could not encode {}", path.display()))]
+    Encode { path: PathBuf, source: encode::Error },
     #[snafu(display("could not write {}", path.display()))]
-    SaveImage { path: PathBuf, source: image::ImageError },
+    Write { path: PathBuf, source: io::Error },
 }
 
-/// Renders `args.frames` frames headlessly and writes each as a PNG, printing a timing summary after the last.
+/// Where the frames go.
+enum Target {
+    Still(PathBuf),
+    /// Numbered files in a directory.
+    Sequence(PathBuf),
+    /// One animated WebP.
+    Animation(PathBuf),
+}
+
+impl Target {
+    /// The explicit format wins, then the output's extension, then PNG. Several frames make a
+    /// sequence unless the output is itself a WebP file, which holds them as an animation.
+    fn plan(args: &RenderArgs) -> (Self, Format) {
+        let named = args.out.as_deref().and_then(Format::from_path);
+        let format = args.format.or(named).unwrap_or(Format::Png);
+        let target = match &args.out {
+            Some(out) if args.frames > 1 && format == Format::Webp && named == Some(Format::Webp) => {
+                Self::Animation(out.clone())
+            },
+            Some(out) if args.frames > 1 => Self::Sequence(out.clone()),
+            Some(out) => Self::Still(out.clone()),
+            None if args.frames > 1 => Self::Sequence(PathBuf::from("out/frames")),
+            None => Self::Still(PathBuf::from(format!("out/frame.{}", format.extension()))),
+        };
+        (target, format)
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Still(path) | Self::Sequence(path) | Self::Animation(path) => path,
+        }
+    }
+
+    fn sink(&self, fps: f32, encoding: Encoding) -> Sink {
+        match self {
+            Self::Still(path) => {
+                let path = path.clone();
+                Sink::stills(move |_| path.clone(), encoding)
+            },
+            Self::Sequence(dir) => {
+                let dir = dir.clone();
+                Sink::stills(move |frame| dir.join(format!("{frame:04}.{}", encoding.format.extension())), encoding)
+            },
+            Self::Animation(path) => Sink::animation(path.clone(), fps, encoding),
+        }
+    }
+}
+
+/// Renders `args.frames` frames headlessly and writes them out, printing a timing summary after the last.
+///
+/// Each frame is encoded and written on other threads while the next one renders.
 pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     let size = args.size.unwrap_or_else(|| OutputSize::for_view(args.view));
     ensure!(size.width > 0 && size.height > 0, EmptyOutputSnafu { width: size.width, height: size.height });
+    let (target, format) = Target::plan(args);
+    ensure!(!args.lossless || format == Format::Webp, LosslessFormatSnafu { format });
+    let encoding = Encoding { format, quality: args.quality, lossless: args.lossless };
     let ss = common.supersampling();
     let shaded = size.scaled(ss);
 
@@ -50,17 +110,20 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     let mut renderer = Renderer::new(&device, &queue, &sources);
     let readback = Readback::new(&device, shaded);
     let reference = args.reference.then(|| Reference::open(Path::new(COVER))).transpose()?;
+    let sink = target.sink(args.fps, encoding);
     let mut pass_sum = PassTimes::default();
+    let mut wall_ms = 0.0;
 
+    let begun = Instant::now();
     for frame in 0..args.frames {
-        let out_path = if args.frames > 1 { args.out.join(format!("{frame:04}.png")) } else { args.out.clone() };
-        let uniforms = Uniforms {
-            resolution: [shaded.width as f32, shaded.height as f32],
-            time: (args.time + frame as f32 / args.fps) * common.speed,
-            field_scale: ss as f32,
-            view: args.view.to_array(),
-            params: common.param_array(),
-        };
+        let uniforms = Uniforms::new(
+            [size.width, size.height],
+            ss,
+            common.field_step,
+            (args.time + frame as f32 / args.fps) * common.speed,
+            args.view.to_array(),
+            common.param_array(),
+        );
 
         let started = Instant::now();
         let mut enc = device.create_command_encoder(&Default::default());
@@ -69,34 +132,31 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
         queue.submit([enc.finish()]);
         renderer.after_submit();
         let mapped = readback.map(&device)?;
-        let wall_ms = started.elapsed().as_secs_f32() * 1000.0;
+        wall_ms = started.elapsed().as_secs_f32() * 1000.0;
         let pass = renderer.pass_ms(&device, true).unwrap_or_default();
         pass_sum.field += pass.field;
         pass_sum.shade += pass.shade;
 
-        let image = downsample(&mapped.pixels(), shaded.width, ss, size);
-        match &reference {
-            Some(reference) => save(&out_path, &reference.side_by_side(args.view, &image))?,
-            None => save(&out_path, &image)?,
-        }
-        if args.frames == 1 || frame + 1 == args.frames {
-            print_summary(&out_path, size, ss, wall_ms, pass_sum, args.frames);
+        let image = mapped.with_rows(|rows| downsample(rows, ss));
+        drop(mapped);
+        let image = match &reference {
+            Some(reference) => reference.side_by_side(args.view, &image),
+            None => image,
+        };
+        if !sink.push(frame, image) {
+            break;
         }
     }
+    sink.finish()?;
+    print_summary(target.path(), size, ss, wall_ms, pass_sum, args.frames, begun.elapsed().as_secs_f32());
     Ok(())
 }
 
-fn save(path: &Path, image: &image::RgbImage) -> Result<(), Error> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).context(CreateDirSnafu { path: dir })?;
-    }
-    image.save(path).context(SaveImageSnafu { path })
-}
-
-/// Prints the output path, size and wall time, then each pass's time averaged over `frames`.
-fn print_summary(path: &Path, size: OutputSize, ss: u32, wall_ms: f32, pass_sum: PassTimes, frames: u32) {
+/// Prints the output path, size and the last frame's render time, then each pass's time averaged
+/// over `frames` and how fast they were written.
+fn print_summary(path: &Path, size: OutputSize, ss: u32, wall_ms: f32, pass_sum: PassTimes, frames: u32, seconds: f32) {
     let n = frames as f32;
-    println!(
+    print!(
         "{} {}x{} (ss {}) wall {:.0}ms | field {:.2}ms shade {:.2}ms (mean of {})",
         path.display(),
         size.width,
@@ -107,4 +167,8 @@ fn print_summary(path: &Path, size: OutputSize, ss: u32, wall_ms: f32, pass_sum:
         pass_sum.shade / n,
         frames
     );
+    if frames > 1 {
+        print!(" | {:.1} frames/s", n / seconds);
+    }
+    println!();
 }

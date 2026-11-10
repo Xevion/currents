@@ -52,12 +52,13 @@ impl Timing {
         })
     }
 
-    /// Timestamp writes that bracket render pass `pass`.
-    pub(super) fn pass_writes(&self, pass: u32) -> wgpu::RenderPassTimestampWrites<'_> {
+    /// Timestamp writes for one render pass of timed pass `pass`, which may span several:
+    /// its first render pass stamps the beginning and its last the end.
+    pub(super) fn pass_writes(&self, pass: u32, first: bool, last: bool) -> wgpu::RenderPassTimestampWrites<'_> {
         wgpu::RenderPassTimestampWrites {
             query_set: &self.set,
-            beginning_of_pass_write_index: Some(2 * pass),
-            end_of_pass_write_index: Some(2 * pass + 1),
+            beginning_of_pass_write_index: first.then_some(2 * pass),
+            end_of_pass_write_index: last.then_some(2 * pass + 1),
         }
     }
 

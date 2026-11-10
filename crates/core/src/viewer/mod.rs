@@ -56,6 +56,8 @@ pub struct Settings {
     pub speed: f32,
     /// Supersampling factor per axis, at least 1.
     pub supersampling: u32,
+    /// Output pixels per flow field texel, at least 1; an adaptive budget may coarsen it.
+    pub field_step: u32,
     pub params: ParamBlock,
     /// Pixel budget for the surface; `None` renders every window pixel.
     pub budget: Option<Budget>,
@@ -99,15 +101,15 @@ struct App {
 }
 
 fn frame_uniforms(settings: &Settings, camera: &Camera, time: f32, gfx: &Gfx) -> Uniforms {
-    let ss = settings.supersampling;
     let size: PhysicalSize<u32> = gfx.size();
-    Uniforms {
-        resolution: [(size.width * ss) as f32, (size.height * ss) as f32],
+    Uniforms::new(
+        [size.width, size.height],
+        settings.supersampling,
+        gfx.field_step(),
         time,
-        field_scale: ss as f32,
-        view: camera.view(gfx.viewport()).to_array(),
-        params: settings.params,
-    }
+        camera.view(gfx.viewport()).to_array(),
+        settings.params,
+    )
 }
 
 impl App {

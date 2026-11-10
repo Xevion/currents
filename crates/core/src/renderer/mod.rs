@@ -1,10 +1,13 @@
 mod debug;
+mod key;
+mod noise;
 mod pass;
 mod timing;
 
 pub use debug::{FieldView, UnknownView};
+use key::{Key, Keys};
 pub(crate) use pass::draw_fullscreen;
-use pass::{Inputs, Pass};
+use pass::{Inputs, Pass, SHARED_BINDINGS};
 pub use timing::PassTimes;
 use timing::Timing;
 
@@ -13,14 +16,64 @@ use crate::params::ParamBlock;
 use crate::shaders::Sources;
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
-    pub resolution: [f32; 2],
-    pub time: f32,
+    /// Shade pixels along each axis.
+    resolution: [f32; 2],
+    time: f32,
     /// Shade pixels per field texel along each axis.
-    pub field_scale: f32,
-    pub view: [f32; 4],
-    pub params: ParamBlock,
+    field_scale: f32,
+    view: [f32; 4],
+    /// Shade pixels per output pixel along each axis.
+    supersampling: f32,
+    /// The key the field pass reads, filled in by the renderer: its time, the texels across it
+    /// (zero when none is held) and the part of the cover it spans.
+    key_time: f32,
+    key_size: [f32; 2],
+    key_view: [f32; 4],
+    params: ParamBlock,
+}
+
+impl Uniforms {
+    /// Uniforms for a picture of `output` pixels showing `view` at `time`.
+    ///
+    /// The shade pass runs `supersampling` times finer than the output along each axis and the
+    /// field pass `field_step` times coarser; both are at least 1. A `field_step` of 1 keeps
+    /// thin filaments of the stream exact, and each step up costs the field pass about a
+    /// quarter of the one below.
+    pub fn new(
+        output: [u32; 2],
+        supersampling: u32,
+        field_step: u32,
+        time: f32,
+        view: [f32; 4],
+        params: ParamBlock,
+    ) -> Self {
+        let supersampling = supersampling.max(1);
+        Self {
+            resolution: output.map(|v| (v * supersampling) as f32),
+            time,
+            field_scale: (supersampling * field_step.max(1)) as f32,
+            view,
+            supersampling: supersampling as f32,
+            key_time: 0.0,
+            key_size: [0.0; 2],
+            key_view: [0.0; 4],
+            params,
+        }
+    }
+
+    /// Whether `other` shows the same picture at some other time.
+    fn same_picture(&self, other: &Self) -> bool {
+        Self { time: 0.0, ..*self } == Self { time: 0.0, ..*other }
+    }
+
+    fn with_key(mut self, key: &Key) -> Self {
+        self.key_time = key.time;
+        self.key_size = key.size.map(|v| v as f32);
+        self.key_view = key.view;
+        self
+    }
 }
 
 pub(crate) const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
@@ -39,14 +92,41 @@ struct Targets {
     field_view: wgpu::TextureView,
     color: wgpu::Texture,
     color_view: wgpu::TextureView,
-    field_bind: wgpu::BindGroup,
     shade_bind: wgpu::BindGroup,
 }
 
+/// The texture keys are rendered into, and the field pass's bindings, which read it.
+struct KeyTarget {
+    size: [u32; 2],
+    view: wgpu::TextureView,
+    field_bind: wgpu::BindGroup,
+}
+
 /// Two fullscreen passes: `field` writes the stripe coordinate, `shade` turns it into colour.
+/// Both read their gradient noise from a tile baked when the renderer is made.
+///
+/// Tracing the liquid's history is most of the field pass, so while frames show the same view
+/// moving forward in time the renderer keeps a key: that history at a fixed time, rendered by
+/// `key_pass` once per stretch of flow and read by every frame of the stretch. The key for
+/// the next stretch is rendered a few stripes a frame while the current one serves.
 pub struct Renderer {
     ubuf: wgpu::Buffer,
+    noise: wgpu::TextureView,
+    noise_sampler: wgpu::Sampler,
+    key_pass: Pass,
+    /// The key pass's own uniforms: the key it renders is not always the one frames read.
+    key_ubuf: wgpu::Buffer,
+    key_bind: wgpu::BindGroup,
+    key_targets: [KeyTarget; 2],
+    keys: Keys,
+    /// The last frame rendered, to tell whether this one continues it.
+    last: Option<Uniforms>,
+    /// Whether the last frame showed a different picture from the one before it and was
+    /// traced roughly for speed.
+    rough: bool,
     field: Pass,
+    /// The field pass with the rough trace, for frames while the picture is changing.
+    field_rough: wgpu::RenderPipeline,
     shade: Pass,
     /// One pipeline per `FieldView`, in its order, bound like the shade pass.
     debug: Vec<wgpu::RenderPipeline>,
@@ -61,6 +141,41 @@ fn shade_source(sources: &Sources, filterable: bool) -> String {
     let sampler =
         if filterable { include_str!("sample_filtered.wgsl") } else { include_str!("sample_unfiltered.wgsl") };
     sources.assemble(&format!("{}\n{sampler}", sources.shade))
+}
+
+/// The bindings every pass starts with: the uniforms, the noise tile and its sampler.
+fn shared_entries<'a>(
+    ubuf: &'a wgpu::Buffer,
+    noise: &'a wgpu::TextureView,
+    noise_sampler: &'a wgpu::Sampler,
+) -> [wgpu::BindGroupEntry<'a>; 3] {
+    [
+        wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(noise) },
+        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(noise_sampler) },
+    ]
+}
+
+/// A key texture of `size` texels and the field pass bindings that read it.
+fn key_target(
+    device: &wgpu::Device,
+    field_layout: &wgpu::BindGroupLayout,
+    shared: &[wgpu::BindGroupEntry<'_>; 3],
+    size: [u32; 2],
+) -> KeyTarget {
+    let view = make_tex(device, size[0], size[1], key::FORMAT).create_view(&Default::default());
+    let [uniforms, noise, noise_sampler] = shared.clone();
+    let field_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: field_layout,
+        entries: &[
+            uniforms,
+            noise,
+            noise_sampler,
+            wgpu::BindGroupEntry { binding: SHARED_BINDINGS, resource: wgpu::BindingResource::TextureView(&view) },
+        ],
+    });
+    KeyTarget { size, view, field_bind }
 }
 
 fn make_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -88,19 +203,39 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let field = Pass::new(device, "field", sources.assemble(&sources.field), Inputs::NONE, FIELD_FORMAT);
+        let field_source = sources.assemble(&sources.field);
+        let key_pass = Pass::new(device, "key", field_source.clone(), "fs_key", Inputs::NONE, key::FORMAT);
+        let field = Pass::new(device, "field", field_source.clone(), "fs_main", Inputs::loaded(1), FIELD_FORMAT);
+        let field_rough = pass::pipeline(
+            device,
+            "field-rough",
+            field_source,
+            "fs_main",
+            &field.layout,
+            &[("rough", 1.0)],
+            FIELD_FORMAT,
+        );
         let shade = Pass::new(
             device,
             "shade",
             shade_source(sources, filterable),
-            Inputs { count: 1, filterable },
+            "fs_main",
+            Inputs { count: 1, filterable, sampler: true },
             COLOR_FORMAT,
         );
         let debug_source = sources.assemble(include_str!("debug.wgsl"));
         let debug = FieldView::ALL
             .map(|view| {
                 let constants = [("mode", f64::from(view.mode()))];
-                pass::pipeline(device, view.name(), debug_source.clone(), &shade.layout, &constants, COLOR_FORMAT)
+                pass::pipeline(
+                    device,
+                    view.name(),
+                    debug_source.clone(),
+                    "fs_main",
+                    &shade.layout,
+                    &constants,
+                    COLOR_FORMAT,
+                )
             })
             .to_vec();
         let sampler = if filterable {
@@ -108,7 +243,40 @@ impl Renderer {
         } else {
             device.create_sampler(&wgpu::SamplerDescriptor::default())
         };
-        Self { ubuf, field, shade, debug, targets: None, sampler, timing: Timing::new(device, queue) }
+        let noise = noise::bake(device, queue, sources);
+        let noise_sampler = noise::sampler(device);
+        let key_ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let key_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &key_pass.layout,
+            entries: &shared_entries(&key_ubuf, &noise, &noise_sampler),
+        });
+        let shared = shared_entries(&ubuf, &noise, &noise_sampler);
+        let key_targets = [(); 2].map(|()| key_target(device, &field.layout, &shared, [1, 1]));
+        Self {
+            ubuf,
+            noise,
+            noise_sampler,
+            key_pass,
+            key_ubuf,
+            key_bind,
+            key_targets,
+            keys: Keys::default(),
+            last: None,
+            rough: false,
+            field,
+            field_rough,
+            shade,
+            debug,
+            targets: None,
+            sampler,
+            timing: Timing::new(device, queue),
+        }
     }
 
     /// Call after submitting the encoder passed to `render`: starts reading back its timestamps.
@@ -124,6 +292,41 @@ impl Renderer {
         self.timing.as_mut()?.latest(device, wait)
     }
 
+    /// Decides which key, if any, this frame reads, and returns the stripes of a key to render
+    /// before it. A frame gets a key only when it continues the last one: the same picture, no
+    /// earlier in time. A still or a moving camera would pay for a key and use it once.
+    fn update_keys(
+        &mut self,
+        device: &wgpu::Device,
+        uniforms: &Uniforms,
+        field_texels: [u32; 2],
+    ) -> Option<key::Slice> {
+        let dt = self.last.filter(|last| last.same_picture(uniforms)).map(|last| uniforms.time - last.time);
+        self.rough = self.last.is_some() && dt.is_none();
+        self.last = Some(*uniforms);
+        let Some(dt) = dt.filter(|&dt| dt >= 0.0) else {
+            self.keys.clear();
+            return None;
+        };
+        let slice = self.keys.advance(uniforms.time, dt, uniforms.view, field_texels)?;
+        if slice.is_heavy() {
+            // a large share of a key in one frame is a visible hitch
+            tracing::debug!(
+                time = uniforms.time,
+                dt,
+                key_time = slice.key.time,
+                span = slice.key.span,
+                stripes = ?slice.stripes,
+                "rendering much of a key at once"
+            );
+        }
+        if slice.stripes.start == 0 && self.key_targets[slice.slot].size != slice.key.size {
+            let shared = shared_entries(&self.ubuf, &self.noise, &self.noise_sampler);
+            self.key_targets[slice.slot] = key_target(device, &self.field.layout, &shared, slice.key.size);
+        }
+        Some(slice)
+    }
+
     /// Returns whether the targets were recreated, which invalidates views taken from the old ones.
     fn ensure_targets(&mut self, device: &wgpu::Device, size: TargetSize) -> bool {
         if self.targets.as_ref().is_some_and(|t| t.size == size) {
@@ -134,26 +337,29 @@ impl Renderer {
             .create_view(&Default::default());
         let color = make_tex(device, width, height, COLOR_FORMAT);
         let color_view = color.create_view(&Default::default());
-        let field_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.field.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.ubuf.as_entire_binding() }],
-        });
+        let [uniforms, noise, noise_sampler] = shared_entries(&self.ubuf, &self.noise, &self.noise_sampler);
         let shade_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.shade.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&field_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                uniforms,
+                noise,
+                noise_sampler,
+                wgpu::BindGroupEntry {
+                    binding: SHARED_BINDINGS,
+                    resource: wgpu::BindingResource::TextureView(&field_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: SHARED_BINDINGS + 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
-        self.targets = Some(Targets { size, field_view, color, color_view, field_bind, shade_bind });
+        self.targets = Some(Targets { size, field_view, color, color_view, shade_bind });
         true
     }
 
-    /// Renders one frame into the internal colour texture; `uniforms.resolution` sets its size,
-    /// and `view` replaces the shaded picture with a view of the field. Returns whether that
+    /// Renders one frame into the internal colour texture, sized by `uniforms`; `view` replaces the shaded picture with a view of the field. Returns whether that
     /// texture was recreated, so views of `color` taken earlier are stale.
     pub fn render(
         &mut self,
@@ -169,16 +375,36 @@ impl Renderer {
             field_scale: uniforms.field_scale.max(1.0) as u32,
         };
         let rebuilt = self.ensure_targets(device, size);
-        queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(uniforms));
+        let field_texels = [size.width.div_ceil(size.field_scale), size.height.div_ceil(size.field_scale)];
+        let slice = self.update_keys(device, uniforms, field_texels);
+        let held = self.keys.held();
+        let frame = held.map_or(*uniforms, |(_, key)| uniforms.with_key(&key));
+        queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&frame));
         let t = self.targets.as_ref().expect("ensure_targets left the targets unset");
-        let writes = |pass| self.timing.as_ref().map(|tm| tm.pass_writes(pass));
-        draw_fullscreen(enc, &t.field_view, &self.field.pipeline, &t.field_bind, writes(0));
+        let stamps = |pass, first, last| self.timing.as_ref().map(|tm| tm.pass_writes(pass, first, last));
+        let keyed = slice.is_some();
+        if let Some(key::Slice { slot, key, stripes }) = slice {
+            queue.write_buffer(&self.key_ubuf, 0, bytemuck::bytes_of(&uniforms.with_key(&key)));
+            let target = &self.key_targets[slot].view;
+            let stamps = stamps(0, true, false);
+            let columns = stripes.map(|stripe| key.stripe_columns(stripe));
+            pass::draw_columns(enc, target, &self.key_pass.pipeline, &self.key_bind, key.size[1], columns, stamps);
+        }
+        let field_bind = &self.key_targets[held.map_or(0, |(slot, _)| slot)].field_bind;
+        let field = if self.rough { &self.field_rough } else { &self.field.pipeline };
+        draw_fullscreen(enc, &t.field_view, field, field_bind, stamps(0, !keyed, true));
         let colour = view.map_or(&self.shade.pipeline, |v| &self.debug[v as usize]);
-        draw_fullscreen(enc, &t.color_view, colour, &t.shade_bind, writes(1));
+        draw_fullscreen(enc, &t.color_view, colour, &t.shade_bind, stamps(1, true, true));
         if let Some(tm) = self.timing.as_mut() {
             tm.resolve(enc);
         }
         rebuilt
+    }
+
+    /// Whether the last frame was rendered in full; `false` after one traced roughly because
+    /// the picture was changing, which rendering the same frame again puts right.
+    pub const fn settled(&self) -> bool {
+        !self.rough
     }
 
     pub fn color(&self) -> &wgpu::Texture {
@@ -203,6 +429,7 @@ mod tests {
         let source = sources.assemble(&sources.field);
         validate("field", &source);
         to_webgl("field", &source, &[]);
+        to_webgl("field-rough", &source, &[("rough", 1.0)]);
     }
 
     #[rstest]
@@ -210,6 +437,13 @@ mod tests {
         let source = shade_source(&Sources::embedded(), filterable);
         validate("shade", &source);
         to_webgl("shade", &source, &[]);
+    }
+
+    #[test]
+    fn noise_shader_validates_and_translates_for_webgl() {
+        let source = noise::source(&Sources::embedded());
+        validate("noise", &source);
+        to_webgl("noise", &source, &[("texels", 1024.0)]);
     }
 
     #[test]

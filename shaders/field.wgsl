@@ -5,10 +5,21 @@ const EDDY_RISE_END = 6.0;
 const EDDY_FADE_START = 12.0;
 const EDDY_FADE_END = 26.0;
 
-// Trace step in seconds, longer only when a trace would take more than MAX_TRACE_STEPS.
+// Trace step in seconds, and the most steps a trace takes to get upstream of the eddies.
+// Only liquid all but stopped behind the ball needs them all.
 const MAX_TRACE_DT = 0.25;
-const MAX_TRACE_STEPS = 64;
+const MAX_TRACE_STEPS = 192;
 const FLOW_SPEED = 4.0;   // periods per second
+
+// Set for frames that cannot build on the one before (the camera is moving): they trace
+// every pixel in full, so the trace gives up the accuracy that keeps successive keys in
+// agreement for about four times the speed.
+override rough: bool = false;
+
+fn flow_noise(p: vec2f) -> vec3f {
+    if (rough) { return gradient_noise(p); }
+    return gradient_noise_smooth(p);
+}
 
 // smoothstep and its slope
 fn smoothstep_with_slope(a: f32, b: f32, x: f32) -> vec2f {
@@ -70,10 +81,6 @@ fn wake_profile(yy: f32) -> vec2f {
     return vec2f(s * th * fade, ((1.0 - th * th) - s * th * 2.0 * yy / (w * w)) * fade);
 }
 
-fn wake_deficit(y: vec2f, scn: Scene) -> f32 {
-    return wake_peak_deficit(y, scn).x * wake_profile(y.y).y;
-}
-
 fn wake_velocity(y: vec2f, scn: Scene) -> vec2f {
     let d = wake_peak_deficit(y, scn);
     let g = wake_profile(y.y);
@@ -94,8 +101,8 @@ fn flow_velocity(y: vec2f, t: f32, scn: Scene) -> vec2f {
     let l2 = 5.5 + P(P_EDDY_LEN_SMALL);
     let a1 = 1.4 + P(P_EDDY_AMP_LARGE);
     let a2 = 0.4 + P(P_EDDY_AMP_SMALL);
-    let n1 = gradient_noise(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));
-    let n2 = gradient_noise(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));
+    let n1 = flow_noise(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));
+    let n2 = flow_noise(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));
     let nv = a1 * lx * n1.x + a2 * l2 * n2.x;
     let ng = vec2f(a1 * n1.y + a2 * n2.y, a1 * lx / ly * n1.z + a2 * n2.z);
 
@@ -111,37 +118,113 @@ fn flow_velocity(y: vec2f, t: f32, scn: Scene) -> vec2f {
     return v + vec2f(grad.y, -grad.x);
 }
 
-// Follows the fluid at p back in time until it is upstream of the eddies.
-// Returns where it was (xy) and how long ago (z).
-fn trace_back(p: vec2f, t: f32, scn: Scene) -> vec3f {
-    let ux = FLOW_SPEED * scn.down.x;
+// Distance downstream of the line the eddies begin after; at or above it (zero or less) the
+// flow is steady.
+fn inflow_distance(y: vec2f, scn: Scene) -> f32 {
+    return dot(y, scn.down) - (EDDY_RISE_START - 3.0);
+}
+
+// The liquid at y in the steady flow at time t: the stream function there, which labels its
+// line (x), and a label that rides with it along the line (y).
+fn steady_liquid(y: vec2f, t: f32, scn: Scene) -> vec2f {
+    let r2 = max(dot(y, y), 1e-6);
+    return vec2f(y.y * (1.0 - min(scn.radius * scn.radius / r2, 1.0)), y.x - FLOW_SPEED * t);
+}
+
+// Where the liquid at y was dt before time t. Fourth order: a trace has to land in the same
+// place wherever its steps fall, or the picture shifts each time a key retraces it.
+fn step_back(y: vec2f, t: f32, dt: f32, scn: Scene) -> vec2f {
+    let half = 0.5 * dt;
+    let v1 = flow_velocity(y, t, scn);
+    let v2 = flow_velocity(y - v1 * half, t - half, scn);
+    if (rough) { return y - v2 * dt; }
+    let v3 = flow_velocity(y - v2 * half, t - half, scn);
+    let v4 = flow_velocity(y - v3 * dt, t - dt, scn);
+    return y - (v1 + 2.0 * (v2 + v3) + v4) * (dt / 6.0);
+}
+
+// The liquid met where a step back from y (inflow distance d, at time t) to a point at distance
+// dn, dt earlier, crossed into the steady flow. Both of its labels keep from there on, so every
+// trace of the same liquid agrees on them however long it runs. The crossing is stepped to
+// rather than read off the chord, which cuts the corner where the flow bends round the ball.
+fn liquid_at_inflow(y: vec2f, d: f32, dn: f32, t: f32, dt: f32, scn: Scene) -> vec2f {
+    let first = dt * d / (d - dn);
+    // one correction for the flow speeding up or slowing down across the step
+    let part = first * d / (d - inflow_distance(step_back(y, t, first, scn), scn));
+    return steady_liquid(step_back(y, t, part, scn), t - part, scn);
+}
+
+// Follows the liquid at p back from time t until it is upstream of the eddies, and returns it
+// as steady_liquid does.
+fn traced(p: vec2f, t: f32, scn: Scene) -> vec2f {
     var y = p;
-    var back = 0.0;
-    // below the far front the flow is uniform, so that stretch is one exact jump
-    // (only drifting, slower in the middle of the wake)
-    let over = dot(y, scn.down) - (EDDY_FADE_END + P(P_EDDY_FADE_END) + 0.5);
-    if (over > 0.0) {
-        let slow = 1.0 - wake_deficit(y, scn);
-        back = over / (ux * slow);
-        y.x -= FLOW_SPEED * slow * back;
+    var d = inflow_distance(y, scn);
+    if (d <= 0.0) { return steady_liquid(y, t, scn); }
+    // every trace runs until it is clear, however slow the water: one that stopped among the
+    // eddies would give a different answer for the same liquid from a different start
+    // a rough trace stops at a third of the steps, leaving only the slowest water unfinished
+    let steps = select(MAX_TRACE_STEPS, MAX_TRACE_STEPS / 3, rough);
+    for (var i = 0; i < steps; i++) {
+        let tt = t - f32(i) * MAX_TRACE_DT;
+        let yn = step_back(y, tt, MAX_TRACE_DT, scn);
+        let dn = inflow_distance(yn, scn);
+        if (dn <= 0.0) { return liquid_at_inflow(y, d, dn, tt, MAX_TRACE_DT, scn); }
+        y = yn;
+        d = dn;
     }
-    let dist = dot(y, scn.down) - (EDDY_RISE_START - 3.0);
-    if (dist <= 0.0) { return vec3f(y, back); }
-    // long enough to get clear of the slow water too
-    let span = dist / (ux * (1.0 - wake_deficit(y, scn))) * 1.1;
-    // whole steps then a shorter last one, so the result varies smoothly with span; a step
-    // count that jumps between neighbouring pixels leaves fixed seams in the pattern
-    let h = max(MAX_TRACE_DT, span / f32(MAX_TRACE_STEPS));
-    let n = clamp(i32(ceil(span / h)), 1, MAX_TRACE_STEPS);
-    let last = span - f32(n - 1) * h;
+    return steady_liquid(y, t - f32(steps) * MAX_TRACE_DT, scn);
+}
+
+// A key is the traced liquid over the view and a margin round it, at a time a little before
+// the frame's. While one is held, a frame follows the liquid back only as far as the key's
+// time and reads the rest of its history there. Liquid from outside the key is traced in full.
+@group(0) @binding(3) var key: texture_2d<f32>;
+
+fn catmull_rom(f: f32) -> vec4f {
+    let f2 = f * f;
+    let f3 = f2 * f;
+    return vec4f(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0, -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+}
+
+// The liquid at p now, by way of the key.
+fn carried(p: vec2f, scn: Scene) -> vec2f {
+    var y = p;
+    var d = inflow_distance(y, scn);
+    if (d <= 0.0) { return steady_liquid(y, u.time, scn); }
+    let span = u.time - u.key_time;
+    let n = max(i32(ceil(span / MAX_TRACE_DT)), 1);
+    let h = span / f32(n);
     for (var i = 0; i < n; i++) {
-        let dt = select(h, last, i == n - 1);
-        let tt = t - back - f32(i) * h;
-        let v1 = flow_velocity(y, tt, scn);
-        let v2 = flow_velocity(y - v1 * (0.5 * dt), tt - 0.5 * dt, scn);
-        y -= v2 * dt;
+        let tt = u.time - f32(i) * h;
+        let yn = step_back(y, tt, h, scn);
+        let dn = inflow_distance(yn, scn);
+        if (dn <= 0.0) { return liquid_at_inflow(y, d, dn, tt, h, scn); }
+        y = yn;
+        d = dn;
     }
-    return vec3f(y, back + span);
+    let cover = plane_to_cover(scn.cam, y + scn.centre);
+    let g = (cover - u.key_view.xy) / (u.key_view.zw - u.key_view.xy) * u.key_size - 0.5;
+    let cell = floor(g);
+    if (any(cell < vec2f(1.0)) || any(cell > u.key_size - 3.0)) { return traced(y, u.key_time, scn); }
+    let wx = catmull_rom(g.x - cell.x);
+    let wy = catmull_rom(g.y - cell.y);
+    var acc = vec2f(0.0);
+    for (var j = 0; j < 4; j++) {
+        var row = vec2f(0.0);
+        for (var i = 0; i < 4; i++) {
+            row += wx[i] * textureLoad(key, vec2i(cell) + vec2i(i - 1, j - 1), 0).xy;
+        }
+        acc += wy[j] * row;
+    }
+    return acc;
+}
+
+@fragment
+fn fs_key(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let scn = scene();
+    let cover = u.key_view.xy + pos.xy / u.key_size * (u.key_view.zw - u.key_view.xy);
+    let rel = cover_to_plane(scn.cam, cover) - scn.centre;
+    return vec4f(traced(rel, u.key_time, scn), 0.0, 0.0);
 }
 
 @fragment
@@ -149,24 +232,21 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let cover = pos_to_cover(pos.xy * u.field_scale);
     let scn = scene();
     let rel = cover_to_plane(scn.cam, cover) - scn.centre;
-    let tr = trace_back(rel, u.time, scn);
-    let src = tr.xy;
+    var liquid: vec2f;
+    if (u.key_size.x > 0.0) {
+        liquid = carried(rel, scn);
+    } else {
+        liquid = traced(rel, u.time, scn);
+    }
     let a = scn.radius;
-    // upstream of the eddies the flow is steady, so its stream function labels the lines
-    let r2 = max(dot(src, src), 1e-6);
-    let psi = src.y * (1.0 - min(a * a / r2, 1.0));
     let rr = length(rel);
     // the stream flares into a pool around the obstacle and widens a little downstream
     let pool = (0.7 + P(P_POOL_FLARE)) * smoothstep(a * 1.8, a * 1.0, rr) * smoothstep(0.9, -0.3, dot(rel, scn.down) / a);
     let hw = 0.8 + P(P_STREAM_HALF_WIDTH) + pool;
-    var c = abs(psi) - hw;
-    if (r2 < a * a) { c = -hw; }
-
-    // label that rides with the fluid along each band
-    let m = src.x - FLOW_SPEED * (u.time - tr.z);
+    let c = abs(liquid.x) - hw;
     // on-screen velocity of the liquid here, in reference pixels per unit time
     let v = flow_velocity(rel, u.time, scn);
     let p0 = plane_to_cover(scn.cam, rel + scn.centre);
     let vs = (plane_to_cover(scn.cam, rel + scn.centre + v * 0.01) - p0) * (REFPX / 0.01);
-    return vec4f(c, m, vs);
+    return vec4f(c, liquid.y, vs);
 }

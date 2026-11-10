@@ -15,9 +15,14 @@ const UP: f64 = 1.1;
 const MIN_SCALE: f64 = 0.3;
 /// How close under the last scale that was too slow the scale may climb back.
 const CEILING_MARGIN: f64 = 0.95;
+/// Output pixels per field texel once frames have run long. The field pass is the larger
+/// part of a frame and this quarters it, softening only the thinnest filaments of the stream.
+const COARSE_FIELD_STEP: u32 = 2;
 
-/// Caps how many window pixels are shaded: a fixed pixel budget, then a per-axis scale that
-/// shrinks while frames run long and recovers once they have headroom again.
+/// Caps the work per frame: a fixed pixel budget, then cheaper frames while they run long.
+///
+/// Slow frames first coarsen the flow field, which stays coarse from then on, and after that
+/// shrink a per-axis scale that recovers once frames have headroom again.
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub max_pixels: f64,
@@ -33,12 +38,18 @@ pub(crate) struct RenderScale {
     frames: u32,
     elapsed: f32,
     fast: u32,
+    field_step: u32,
 }
 
 impl RenderScale {
-    pub(crate) fn new(budget: Option<Budget>) -> Self {
+    pub(crate) fn new(budget: Option<Budget>, field_step: u32) -> Self {
         let scale = budget.map_or(1.0, |b| b.scale.clamp(MIN_SCALE, 1.0));
-        Self { budget, scale, ceiling: 1.0, frames: 0, elapsed: 0.0, fast: 0 }
+        Self { budget, scale, ceiling: 1.0, frames: 0, elapsed: 0.0, fast: 0, field_step: field_step.max(1) }
+    }
+
+    /// Output pixels per flow field texel.
+    pub(crate) fn field_step(&self) -> u32 {
+        self.field_step
     }
 
     pub(crate) fn scale(&self) -> f64 {
@@ -54,7 +65,7 @@ impl RenderScale {
         PhysicalSize::new(scaled(w), scaled(h))
     }
 
-    /// Counts a frame that took `dt` seconds; true when the scale changed.
+    /// Counts a frame that took `dt` seconds; true when the scale or the field step changed.
     pub(crate) fn observe(&mut self, dt: f32) -> bool {
         if !self.budget.is_some_and(|b| b.adaptive) || dt > STALL_SECS {
             return false;
@@ -67,6 +78,11 @@ impl RenderScale {
         let mean = self.elapsed / self.frames as f32;
         (self.frames, self.elapsed) = (0, 0.0);
         let before = self.scale;
+        if mean > SLOW_SECS && self.field_step < COARSE_FIELD_STEP {
+            self.field_step = COARSE_FIELD_STEP;
+            self.fast = 0;
+            return true;
+        }
         if mean > SLOW_SECS {
             self.ceiling = self.scale;
             self.scale = (self.scale * DOWN).max(MIN_SCALE);
@@ -102,28 +118,38 @@ mod tests {
 
     #[test]
     fn native_windows_render_every_pixel() {
-        check!(RenderScale::new(None).fit(PhysicalSize::new(3840, 2160)) == PhysicalSize::new(3840, 2160));
+        check!(RenderScale::new(None, 1).fit(PhysicalSize::new(3840, 2160)) == PhysicalSize::new(3840, 2160));
     }
 
     #[test]
     fn the_budget_caps_pixels_and_keeps_the_aspect() {
-        let size = RenderScale::new(Some(ADAPTIVE)).fit(PhysicalSize::new(2000, 1000));
+        let size = RenderScale::new(Some(ADAPTIVE), 1).fit(PhysicalSize::new(2000, 1000));
         check!(f64::from(size.width) * f64::from(size.height) <= 1.001e6);
         check!(size.width == 2 * size.height);
     }
 
     #[test]
-    fn slow_frames_shrink_the_scale_and_steady_ones_leave_it() {
-        let mut scale = RenderScale::new(Some(ADAPTIVE));
+    fn slow_frames_coarsen_the_field_before_shrinking_the_scale() {
+        let mut scale = RenderScale::new(Some(ADAPTIVE), 1);
         check!(!run(&mut scale, 1.0 / 60.0, 3.0));
         check!(run(&mut scale, 1.0 / 30.0, 0.6));
-        check!(scale.scale() < 1.0);
+        check!((scale.field_step(), scale.scale() < 1.0) == (COARSE_FIELD_STEP, false));
+        check!(run(&mut scale, 1.0 / 30.0, 0.6));
+        check!((scale.field_step(), scale.scale() < 1.0) == (COARSE_FIELD_STEP, true));
+    }
+
+    #[test]
+    fn the_field_stays_coarse_after_frames_recover() {
+        let mut scale = RenderScale::new(Some(ADAPTIVE), 1);
+        run(&mut scale, 1.0 / 30.0, 0.6);
+        run(&mut scale, 1.0 / 120.0, 30.0);
+        check!(scale.field_step() == COARSE_FIELD_STEP);
     }
 
     #[test]
     fn recovery_stops_short_of_the_scale_that_was_too_slow() {
-        let mut scale = RenderScale::new(Some(ADAPTIVE));
-        run(&mut scale, 1.0 / 30.0, 0.6);
+        let mut scale = RenderScale::new(Some(ADAPTIVE), 1);
+        run(&mut scale, 1.0 / 30.0, 1.2);
         let ceiling = 1.0;
         run(&mut scale, 1.0 / 120.0, 30.0);
         check!(scale.scale() < ceiling);
@@ -132,9 +158,10 @@ mod tests {
 
     #[test]
     fn stalls_and_fixed_budgets_never_change_the_scale() {
-        let mut adaptive = RenderScale::new(Some(ADAPTIVE));
+        let mut adaptive = RenderScale::new(Some(ADAPTIVE), 1);
         check!(!run(&mut adaptive, 0.5, 10.0));
-        let mut fixed = RenderScale::new(Some(Budget { adaptive: false, ..ADAPTIVE }));
+        let mut fixed = RenderScale::new(Some(Budget { adaptive: false, ..ADAPTIVE }), 1);
         check!(!run(&mut fixed, 1.0 / 20.0, 5.0));
+        check!(fixed.field_step() == 1);
     }
 }

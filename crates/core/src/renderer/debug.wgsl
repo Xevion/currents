@@ -2,13 +2,13 @@
 // 1 line coordinate, 2 flow label, 3 velocity, 4 stripe density.
 override mode: u32 = 1u;
 
-@group(0) @binding(1) var field: texture_2d<f32>;
+@group(0) @binding(3) var field: texture_2d<f32>;
 // part of the layout shared with the shade pass; the views read raw texels instead
-@group(0) @binding(2) var smp: sampler;
+@group(0) @binding(4) var smp: sampler;
 
 // Screen speed (reference px per unit time) drawn at half brightness and half arrow length.
 const SPEED_REF = 40.0;
-// Output pixels between velocity arrows.
+// Field texels between velocity arrows.
 const ARROW_CELL = 36.0;
 const TAU = 6.2831853;
 
@@ -34,7 +34,7 @@ fn segment_distance(p: vec2f, a: vec2f, b: vec2f) -> f32 {
     return length(p - a - ab * t);
 }
 
-// Lines of an arrow for the velocity under its grid cell, as coverage at q (output px).
+// Lines of an arrow for the velocity under its grid cell, as coverage at q (field texels).
 fn arrow(q: vec2f) -> f32 {
     let centre = (floor(q / ARROW_CELL) + 0.5) * ARROW_CELL;
     let v = load(vec2i(centre)).zw;
@@ -53,7 +53,6 @@ fn arrow(q: vec2f) -> f32 {
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    // field texels are output pixels; shade pixels are field_scale times finer
     let q = pos.xy / u.field_scale;
     let i = vec2i(q);
     let f = load(i);
@@ -79,7 +78,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         // line periods per output pixel; 0.5 is two pixels per period, where stripes alias
         let gx = load(i + vec2i(1, 0)).x - load(i - vec2i(1, 0)).x;
         let gy = load(i + vec2i(0, 1)).x - load(i - vec2i(0, 1)).x;
-        let density = 0.5 * length(vec2f(gx, gy));
+        let density = 0.5 * length(vec2f(gx, gy)) * u.supersampling / u.field_scale;
         col = heat(density / 0.5);
         if (density > 0.5) { col = vec3f(1.0, 0.1, 0.9); }
         if (c < 0.0) { col *= 0.35; }

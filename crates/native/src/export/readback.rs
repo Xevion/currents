@@ -2,6 +2,7 @@ use std::sync::mpsc;
 
 use snafu::ResultExt;
 
+use super::downsample::Rows;
 use super::{Error, ReadbackSnafu};
 use crate::cli::OutputSize;
 
@@ -58,11 +59,11 @@ impl Readback {
 }
 
 impl Mapped<'_> {
-    /// The pixels as tightly packed rows of RGBA bytes.
-    pub(super) fn pixels(self) -> Vec<u8> {
+    /// Runs `read` over the pixels where the GPU mapped them, without copying them out.
+    pub(super) fn with_rows<T>(&self, read: impl FnOnce(Rows<'_>) -> T) -> T {
         let Readback { buffer, size, row_pitch } = self.readback;
         let view = buffer.slice(..).get_mapped_range().expect("readback buffer is mapped while `Mapped` lives");
-        view.chunks_exact(*row_pitch as usize).flat_map(|row| &row[..size.width as usize * 4]).copied().collect()
+        read(Rows { bytes: &view, pitch: *row_pitch as usize, width: size.width })
     }
 }
 

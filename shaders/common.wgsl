@@ -1,8 +1,12 @@
 struct Uniforms {
-    resolution: vec2f,
+    resolution: vec2f,      // shade pixels
     time: f32,
-    field_scale: f32,
+    field_scale: f32,       // shade pixels per field texel
     view: vec4f,
+    supersampling: f32,     // shade pixels per output pixel
+    key_time: f32,          // time of the key the field pass reads
+    key_size: vec2f,        // texels across the key; zero when none is held
+    key_view: vec4f,        // part of the cover the key spans
     params: array<vec4f, 8>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -116,25 +120,46 @@ fn hash12(p: vec2f) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// Gradient noise: value in x, derivative in yz.
+// Gradient noise: value in x, derivative in yz. Read from a tile the renderer bakes once,
+// NOISE_PERIOD lattice cells across, so the pattern repeats that far apart.
+const NOISE_PERIOD = 64.0;
+@group(0) @binding(1) var noise_tile: texture_2d<f32>;
+@group(0) @binding(2) var noise_smp: sampler;
+
 fn gradient_noise(p: vec2f) -> vec3f {
-    let i = floor(p);
-    let f = fract(p);
-    let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    let dw = 30.0 * f * f * (f * (f - 2.0) + 1.0);
-    let ga = hash22(i);
-    let gb = hash22(i + vec2f(1.0, 0.0));
-    let gc = hash22(i + vec2f(0.0, 1.0));
-    let gd = hash22(i + vec2f(1.0, 1.0));
-    let va = dot(ga, f);
-    let vb = dot(gb, f - vec2f(1.0, 0.0));
-    let vc = dot(gc, f - vec2f(0.0, 1.0));
-    let vd = dot(gd, f - vec2f(1.0, 1.0));
-    let k = va - vb - vc + vd;
-    let v = va + w.x * (vb - va) + w.y * (vc - va) + w.x * w.y * k;
-    let d = ga + w.x * (gb - ga) + w.y * (gc - ga) + w.x * w.y * (ga - gb - gc + gd)
-        + dw * (w.yx * k + vec2f(vb, vc) - va);
-    return vec3f(v, d);
+    return textureSampleLevel(noise_tile, noise_smp, p / NOISE_PERIOD, 0.0).xyz;
+}
+
+// The noise blended across four texels each way by a cubic B-spline rather than two by a
+// line. Linear blending leaves creases, and a trace that crosses them lands differently
+// depending on where its steps fall. Four sampler taps placed between texel pairs do the
+// sixteen-texel blend.
+fn gradient_noise_smooth(p: vec2f) -> vec3f {
+    let size = vec2f(textureDimensions(noise_tile));
+    let t = p / NOISE_PERIOD * size - 0.5;
+    let i = floor(t);
+    let f = t - i;
+    let g = 1.0 - f;
+    let w0 = g * g * g / 6.0;
+    let w1 = (3.0 * f * f * f - 6.0 * f * f + 4.0) / 6.0;
+    let w3 = f * f * f / 6.0;
+    let w2 = 1.0 - w0 - w1 - w3;
+    let lo = w0 + w1;
+    let hi = w2 + w3;
+    let at_lo = (i - 0.5 + w1 / lo) / size;
+    let at_hi = (i + 1.5 + w3 / hi) / size;
+    let a = textureSampleLevel(noise_tile, noise_smp, vec2f(at_lo.x, at_lo.y), 0.0).xyz;
+    let b = textureSampleLevel(noise_tile, noise_smp, vec2f(at_hi.x, at_lo.y), 0.0).xyz;
+    let c = textureSampleLevel(noise_tile, noise_smp, vec2f(at_lo.x, at_hi.y), 0.0).xyz;
+    let d = textureSampleLevel(noise_tile, noise_smp, vec2f(at_hi.x, at_hi.y), 0.0).xyz;
+    return lo.y * (lo.x * a + hi.x * b) + hi.y * (lo.x * c + hi.x * d);
+}
+
+// The same noise where neighbouring pixels are `stride` lattice cells apart: read from a
+// level of the tile about that coarse, so a minified pattern does not skip across the tile.
+fn gradient_noise_spaced(p: vec2f, stride: f32) -> vec3f {
+    let texels = f32(textureDimensions(noise_tile).x) / NOISE_PERIOD;
+    return textureSampleLevel(noise_tile, noise_smp, p / NOISE_PERIOD, log2(max(stride * texels, 1.0))).xyz;
 }
 
 fn value_noise(p: vec2f) -> f32 {

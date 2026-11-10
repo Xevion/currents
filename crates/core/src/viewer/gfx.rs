@@ -24,6 +24,9 @@ pub(crate) struct Gfx {
     scale: RenderScale,
     /// The window's size; the surface is this scaled down by `scale`.
     physical: PhysicalSize<u32>,
+    /// What the renderer's colour texture holds, so a frame that would repeat it (paused with
+    /// the camera still) is presented without running the passes again.
+    drawn: Option<(Uniforms, Option<FieldView>)>,
 }
 
 impl Gfx {
@@ -38,7 +41,7 @@ impl Gfx {
     ) -> Result<Self, Error> {
         let surface = instance.create_surface(window.clone()).context(CreateSurfaceSnafu)?;
         let Gpu { adapter, device, queue } = gpu::request(&instance, Some(&surface)).await.context(GpuSnafu)?;
-        let scale = RenderScale::new(settings.budget);
+        let scale = RenderScale::new(settings.budget, settings.field_step);
         let physical = window.inner_size();
         let size = scale.fit(physical);
         let mut config = surface.get_default_config(&adapter, size.width, size.height).context(NoSurfaceConfigSnafu)?;
@@ -54,12 +57,17 @@ impl Gfx {
         if let Some(error) = internal.or(validation.pop().await) {
             return PipelinesSnafu { message: error.to_string() }.fail();
         }
-        Ok(Self { window, surface, config, device, queue, renderer, blit, scale, physical })
+        Ok(Self { window, surface, config, device, queue, renderer, blit, scale, physical, drawn: None })
     }
 
     /// Pixels the shaders render at, before supersampling.
     pub(crate) fn size(&self) -> PhysicalSize<u32> {
         PhysicalSize::new(self.config.width, self.config.height)
+    }
+
+    /// Output pixels per flow field texel this frame.
+    pub(crate) fn field_step(&self) -> u32 {
+        self.scale.field_step()
     }
 
     /// The window in physical pixels, which pointer positions are measured in.
@@ -85,7 +93,13 @@ impl Gfx {
     pub(crate) fn observe_frame(&mut self, dt: f32) {
         if self.scale.observe(dt) {
             self.configure();
-            info!(scale = self.scale.scale(), width = self.config.width, height = self.config.height, "render scale");
+            info!(
+                scale = self.scale.scale(),
+                field_step = self.scale.field_step(),
+                width = self.config.width,
+                height = self.config.height,
+                "render scale"
+            );
         }
     }
 
@@ -109,8 +123,11 @@ impl Gfx {
         view: Option<FieldView>,
     ) -> PassTimes {
         let mut enc = self.device.create_command_encoder(&Default::default());
-        if self.renderer.render(&self.device, &self.queue, &mut enc, uniforms, view) {
-            self.blit.bind(&self.device, self.renderer.color_view());
+        if self.drawn != Some((*uniforms, view)) || !self.renderer.settled() {
+            if self.renderer.render(&self.device, &self.queue, &mut enc, uniforms, view) {
+                self.blit.bind(&self.device, self.renderer.color_view());
+            }
+            self.drawn = Some((*uniforms, view));
         }
         let view = frame.texture.create_view(&Default::default());
         self.blit.draw(&mut enc, &view);

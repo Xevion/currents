@@ -1,6 +1,7 @@
 mod size;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
 pub(crate) use currents_core::View;
@@ -9,6 +10,8 @@ use currents_core::shaders::{self, Sources};
 use currents_core::viewer::Settings;
 use currents_core::{ParamBlock, ParamOverride};
 pub(crate) use size::OutputSize;
+
+use crate::export::encode::Format;
 
 /// Live rendering of the Currents cover. With no subcommand, opens the interactive viewer
 /// (scroll to zoom at the cursor, drag to pan, space to pause, R to reset, D to cycle the
@@ -32,6 +35,9 @@ pub(crate) struct Common {
     /// Supersampling factor per axis
     #[arg(long, default_value_t = 2, global = true)]
     pub(crate) ss: u32,
+    /// Output pixels per flow field texel; above 1 trades the stream's thinnest filaments for speed
+    #[arg(long, default_value_t = 1, global = true)]
+    pub(crate) field_step: u32,
     /// Tuning parameter override, INDEX=VALUE (repeatable)
     #[arg(short = 'p', long = "param", global = true)]
     pub(crate) params: Vec<ParamOverride>,
@@ -61,6 +67,7 @@ impl Common {
             sources: self.sources()?,
             speed: self.speed,
             supersampling: self.supersampling(),
+            field_step: self.field_step,
             params: self.param_array(),
             budget: None,
             debug: self.debug,
@@ -70,8 +77,48 @@ impl Common {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Render frames to PNG without opening a window
+    /// Render frames to image files without opening a window
     Render(RenderArgs),
+    /// Time the GPU passes over views and sizes without opening a window
+    Bench(BenchArgs),
+}
+
+/// A view together with the text it was given as.
+#[derive(Clone)]
+pub(crate) struct NamedView {
+    pub(crate) name: String,
+    pub(crate) view: View,
+}
+
+impl FromStr for NamedView {
+    type Err = <View as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self { name: s.to_owned(), view: s.parse()? })
+    }
+}
+
+#[derive(Args)]
+pub(crate) struct BenchArgs {
+    /// View to measure, as for `render` (repeatable)
+    #[arg(long = "view", default_values = ["full", "a", "g"], allow_hyphen_values = true)]
+    pub(crate) views: Vec<NamedView>,
+    /// Output size as WxH, shaded at the supersampling factor times this (repeatable)
+    #[expect(clippy::doc_markdown, reason = "the help text must read WxH without backticks")]
+    #[arg(long = "size", default_values = ["1920x1080", "3840x2160"])]
+    pub(crate) sizes: Vec<OutputSize>,
+    /// Time of the first frame in seconds (before the speed multiplier)
+    #[arg(long, default_value_t = 10.0)]
+    pub(crate) time: f32,
+    /// Frames timed per measurement
+    #[arg(long, default_value_t = 30)]
+    pub(crate) frames: u32,
+    /// Also time each pass with one stage cut out, to show what the stage costs
+    #[arg(long)]
+    pub(crate) stages: bool,
+    /// Shader directory to time alongside and compare against
+    #[arg(long)]
+    pub(crate) baseline: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -86,9 +133,19 @@ pub(crate) struct RenderArgs {
     /// Start time in seconds (before the speed multiplier)
     #[arg(long, default_value_t = 0.0)]
     pub(crate) time: f32,
-    /// Output PNG, or a directory when rendering several frames
-    #[arg(long, default_value = "out/frame.png")]
-    pub(crate) out: PathBuf,
+    /// Output file, or a directory of numbered files for several frames (a .webp file takes
+    /// them as one animation); defaults to out/frame.<format>, or out/frames for several
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+    /// Image format; defaults to the output file's extension, else PNG
+    #[arg(long, value_enum)]
+    pub(crate) format: Option<Format>,
+    /// Quality of lossy JPEG and WebP, 0 to 100
+    #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub(crate) quality: u8,
+    /// Encode WebP without loss
+    #[arg(long)]
+    pub(crate) lossless: bool,
     /// Place the matching crop of the cover on the left
     #[arg(long = "ref")]
     pub(crate) reference: bool,
