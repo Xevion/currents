@@ -10,6 +10,8 @@ use snafu::Snafu;
 pub(crate) use timing::PassTimes;
 use timing::Timing;
 
+use crate::gpu::linear_sampler;
+
 #[derive(Debug, Snafu)]
 pub(crate) enum Error {
     #[snafu(display("could not read shader {}", path.display()))]
@@ -86,11 +88,7 @@ impl Renderer {
             field: Pass::new(device, &common, shader_dir, "field", 0, FIELD_FORMAT)?,
             shade: Pass::new(device, &common, shader_dir, "shade", 1, COLOR_FORMAT)?,
             targets: None,
-            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                ..Default::default()
-            }),
+            sampler: linear_sampler(device),
             timing: Timing::new(device, queue),
         })
     }
@@ -108,9 +106,10 @@ impl Renderer {
         self.timing.as_mut()?.latest(device, wait)
     }
 
-    fn ensure_targets(&mut self, device: &wgpu::Device, size: TargetSize) {
+    /// Returns whether the targets were recreated, which invalidates views taken from the old ones.
+    fn ensure_targets(&mut self, device: &wgpu::Device, size: TargetSize) -> bool {
         if self.targets.as_ref().is_some_and(|t| t.size == size) {
-            return;
+            return false;
         }
         let TargetSize { width, height, field_scale } = size;
         let field_view = make_tex(device, width.div_ceil(field_scale), height.div_ceil(field_scale), FIELD_FORMAT)
@@ -132,22 +131,24 @@ impl Renderer {
             ],
         });
         self.targets = Some(Targets { size, field_view, color, color_view, field_bind, shade_bind });
+        true
     }
 
     /// Renders one frame into the internal colour texture; `uniforms.resolution` sets its size.
+    /// Returns whether that texture was recreated, so views of `color` taken earlier are stale.
     pub(crate) fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         enc: &mut wgpu::CommandEncoder,
         uniforms: &Uniforms,
-    ) {
+    ) -> bool {
         let size = TargetSize {
             width: uniforms.resolution[0] as u32,
             height: uniforms.resolution[1] as u32,
             field_scale: uniforms.field_scale.max(1.0) as u32,
         };
-        self.ensure_targets(device, size);
+        let rebuilt = self.ensure_targets(device, size);
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(uniforms));
         let t = self.targets.as_ref().expect("ensure_targets left the targets unset");
         let writes = |pass| self.timing.as_ref().map(|tm| tm.pass_writes(pass));
@@ -156,6 +157,7 @@ impl Renderer {
         if let Some(tm) = self.timing.as_mut() {
             tm.resolve(enc);
         }
+        rebuilt
     }
 
     pub(crate) fn color(&self) -> &wgpu::Texture {

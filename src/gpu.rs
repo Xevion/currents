@@ -42,3 +42,12 @@ fn device_desc(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
         ..Default::default()
     }
 }
+
+/// Bilinear sampler with the default edge handling.
+pub(crate) fn linear_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}

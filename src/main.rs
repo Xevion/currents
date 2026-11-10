@@ -15,6 +15,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 enum Error {
     #[snafu(display("rendering failed"))]
     Render { source: export::Error },
+    #[snafu(display("the viewer failed"))]
+    Viewer { source: viewer::Error },
 }
 
 /// Logs to stderr at `warn` unless `RUST_LOG` says otherwise, and takes in the `log` records wgpu emits.
@@ -32,9 +34,6 @@ fn main() -> Result<(), Error> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Render(args)) => export::run(&cli.common, &args).context(RenderSnafu),
-        None => {
-            viewer::run(cli.common);
-            Ok(())
-        },
+        None => viewer::run(cli.common).context(ViewerSnafu),
     }
 }

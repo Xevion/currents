@@ -1,0 +1,62 @@
+use crate::gpu::linear_sampler;
+use crate::renderer::draw_fullscreen;
+
+/// Scales the renderer's colour texture onto the window's surface.
+pub(super) struct Blit {
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    bind: Option<wgpu::BindGroup>,
+}
+
+impl Blit {
+    /// `supersampling` is the colour texture's size in texels per surface pixel along each axis.
+    pub(super) fn new(device: &wgpu::Device, target: wgpu::TextureFormat, supersampling: u32) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+        });
+        let options = wgpu::PipelineCompilationOptions {
+            constants: &[("scale", f64::from(supersampling)), ("to_linear", f64::from(target.is_srgb()))],
+            ..Default::default()
+        };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blit"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: options.clone(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: options,
+                targets: &[Some(target.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline, sampler: linear_sampler(device), bind: None }
+    }
+
+    /// Points the blit at `source`; call again whenever the texture behind the view is replaced.
+    pub(super) fn bind(&mut self, device: &wgpu::Device, source: &wgpu::TextureView) {
+        self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(source) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        }));
+    }
+
+    pub(super) fn draw(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let bind = self.bind.as_ref().expect("blit drawn before being bound to a source");
+        draw_fullscreen(enc, target, &self.pipeline, bind, None);
+    }
+}
