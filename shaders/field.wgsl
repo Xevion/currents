@@ -22,8 +22,8 @@ struct Env {
 
 fn envs(y: vec2f, wk: Scene) -> Env {
     let dn = dot(y, wk.g);
-    let f1 = ssd(D0, D1 + P(14), dn);
-    let f2 = ssd(D2 + P(12), D3 + P(13), dn);
+    let f1 = ssd(D0, D1 + P(P_EDDY_RISE_END), dn);
+    let f2 = ssd(D2 + P(P_EDDY_FADE_START), D3 + P(P_EDDY_FADE_END), dn);
     let front = f1.x * (1.0 - f2.x);
     let dfront = (f1.y * (1.0 - f2.x) - f1.x * f2.y) * wk.g;
     // nothing is stirred toward the left and right of the picture
@@ -36,7 +36,7 @@ fn envs(y: vec2f, wk: Scene) -> Env {
     let e = front * ed.x * nr.x;
     let de = (dfront * ed.x + front * ed.y * dsx) * nr.x + front * ed.x * nr.y * y / r;
     // the stream itself stays smooth: only the slow sinuous mode bends it
-    let k = 0.12 + P(19);
+    let k = 0.12 + P(P_CORE_NOISE_DAMP);
     let cd = ssd(0.5, 5.0, abs(y.y));
     let damp = mix(k, 1.0, cd.x);
     var o: Env;
@@ -50,19 +50,19 @@ fn envs(y: vec2f, wk: Scene) -> Env {
 // -U D s tanh(y/s): a deficit D sech^2(y/s) across the wake, rising once clear of the ball.
 // Returns D and its gradient.
 fn wake_d(y: vec2f, wk: Scene) -> vec3f {
-    let dm = 0.55 + P(21);
-    let ax = ssd((0.7 + P(26)) * wk.a, (3.7 + P(26)) * wk.a, y.x);
+    let dm = 0.55 + P(P_WAKE_DEFICIT);
+    let ax = ssd((0.7 + P(P_WAKE_START_SHIFT)) * wk.a, (3.7 + P(P_WAKE_START_SHIFT)) * wk.a, y.x);
     let bn = ssd(-5.0, 0.0, dot(y, wk.g));
     return dm * vec3f(ax.x * bn.x, vec2f(ax.y * bn.x, 0.0) + ax.x * bn.y * wk.g);
 }
 
 fn wake_deficit(y: vec2f, wk: Scene) -> f32 {
-    let ch = 1.0 / cosh(y.y / (10.0 + P(22)));
+    let ch = 1.0 / cosh(y.y / (10.0 + P(P_WAKE_WIDTH)));
     return wake_d(y, wk).x * ch * ch;
 }
 
 fn wake_vel(y: vec2f, wk: Scene) -> vec2f {
-    let s = 10.0 + P(22);
+    let s = 10.0 + P(P_WAKE_WIDTH);
     let d = wake_d(y, wk);
     let th = tanh(y.y / s);
     let ig = s * th;
@@ -78,11 +78,11 @@ fn vel(y: vec2f, t: f32, wk: Scene) -> vec2f {
     v += wake_vel(y, wk);
 
     let xi = y - vec2f(FLOW_U * t, 0.0);
-    let lx = 9.0 + P(8);
-    let ly = 12.0 + P(9);
-    let l2 = 5.5 + P(10);
-    let a1 = 1.4 + P(4);
-    let a2 = 0.4 + P(5);
+    let lx = 9.0 + P(P_EDDY_LEN_X);
+    let ly = 12.0 + P(P_EDDY_LEN_Y);
+    let l2 = 5.5 + P(P_EDDY_LEN_SMALL);
+    let a1 = 1.4 + P(P_EDDY_AMP_LARGE);
+    let a2 = 0.4 + P(P_EDDY_AMP_SMALL);
     let n1 = noised(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));
     let n2 = noised(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));
     let nv = a1 * lx * n1.x + a2 * l2 * n2.x;
@@ -90,7 +90,7 @@ fn vel(y: vec2f, t: f32, wk: Scene) -> vec2f {
 
     let km = 6.2831853 / 26.0;
     let hm = 9.0;
-    let am = 0.5 + P(6);
+    let am = 0.5 + P(P_SINUOUS_AMP);
     let gy = exp(-(y.y * y.y) / (hm * hm));
     let sv = am / km * sin(km * xi.x) * gy;
     let sg = vec2f(am * cos(km * xi.x) * gy, sv * (-2.0 * y.y / (hm * hm)));
@@ -108,7 +108,7 @@ fn trace(p: vec2f, t: f32, wk: Scene) -> vec3f {
     var back = 0.0;
     // below the far front the flow is uniform, so that stretch is one exact jump
     // (only drifting, slower in the middle of the wake)
-    let over = dot(y, wk.g) - (D3 + P(13) + 0.5);
+    let over = dot(y, wk.g) - (D3 + P(P_EDDY_FADE_END) + 0.5);
     if (over > 0.0) {
         let slow = 1.0 - wake_deficit(y, wk);
         back = over / (ux * slow);
@@ -147,8 +147,8 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let rr = length(rel);
     let s_down = rel.x;
     // the stream flares into a pool around the obstacle and widens a little downstream
-    let pool = (0.7 + P(23)) * smoothstep(a * 1.8, a * 1.0, rr) * smoothstep(0.9, -0.3, dot(rel, sc.g) / a);
-    let hw = 0.8 + P(24) + pool;
+    let pool = (0.7 + P(P_POOL_FLARE)) * smoothstep(a * 1.8, a * 1.0, rr) * smoothstep(0.9, -0.3, dot(rel, sc.g) / a);
+    let hw = 0.8 + P(P_STREAM_HALF_WIDTH) + pool;
     var c = abs(psi) - hw;
     if (r2 < a * a) { c = -hw; }
 

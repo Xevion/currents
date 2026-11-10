@@ -83,12 +83,12 @@ fn lilac(t: f32) -> vec3f {
 fn profile(dl: f32, ds: f32, w: f32) -> vec2f {
     let fat = smoothstep(7.0, 18.0, w);
     let pw = 0.36 * w + 0.12 * max(w - 8.0, 0.0);
-    var t = mix(0.92 + P(16), 0.44 + P(17), smoothstep(pw - 0.5, pw + 0.6 + 0.1 * w, dl));
+    var t = mix(0.92 + P(P_BAND_EDGE_TONE), 0.44 + P(P_BAND_BODY_TONE), smoothstep(pw - 0.5, pw + 0.6 + 0.1 * w, dl));
     var dens = 0.48 * smoothstep(pw - 0.5, pw + 1.5 + 0.2 * w, dl);
     let uu = dl / max(dl + ds, 1e-3);
     let tt = mix(0.9, 0.4, smoothstep(0.3, 0.88, uu)) - 0.12 * smoothstep(0.85, 1.0, uu);
     let td = 0.5 * smoothstep(0.5, 0.85, uu) + 0.3 * smoothstep(0.85, 1.0, uu);
-    let ft = fat * (1.0 - P(25));
+    let ft = fat * (1.0 - P(P_FAT_BAND_FLATTEN));
     t = mix(t, tt, ft);
     dens = mix(dens, td, ft);
     t = mix(1.0, t, smoothstep(0.25, 0.9 + 0.03 * w, dl));
@@ -106,7 +106,7 @@ fn band_at(c: f32, gl: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
     var o: Band;
     let k = floor(c);
     let f = c - k;
-    let duty = DUTY + (0.05 + P(28)) * (vnoise(vec2f(m * 0.35, k * 3.7)) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
+    let duty = DUTY + (0.05 + P(P_BAND_WIDTH_JITTER)) * (vnoise(vec2f(m * 0.35, k * 3.7)) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
     let lo = 1.0 - duty;
     let w = duty / gl;
     // distances (ref px) to the band's low and high edges; negative outside the band
@@ -208,7 +208,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let lit = max(mix(1.0, smoothstep(-pen, pen, lh), smoothstep(0.0, 0.3 * r3, -lb)),
                   smoothstep(1.05 * r3, 0.9 * r3, length(oc)));
     let contact = exp(-max(rr - 1.0, 0.0) * 12.0);
-    col *= (1.0 - (0.24 + P(18)) * (1.0 - lit)) * (1.0 - 0.18 * contact);
+    col *= (1.0 - (0.24 + P(P_BALL_SHADOW)) * (1.0 - lit)) * (1.0 - 0.18 * contact);
 
     // far fade toward the upper right: the paint breaks up into a mottled spray. The mottling
     // lives in the liquid's own coordinates (stripe periods), so it drifts with the flow.
@@ -221,7 +221,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let vis2 = smoothstep(1.0, 3.0, cpp / 5.7);
         let big = noised(mq * 0.13 + 2.0).x * 3.0 + noised(mq * 0.45 - 7.0).x * 1.5;
         let sp = (noised(mq * 2.6 + 11.0).x * vis1 + 0.7 * noised(mq * 5.7 - 3.0).x * vis2) * 3.4 + 0.5 * gfine;
-        let fe = fd + (0.055 + P(29)) * big;
+        let fe = fd + (0.055 + P(P_SPRAY_MOTTLE)) * big;
         let painted = smoothstep(0.0, 0.62, fe);
         let thr = (0.5 - painted) * 2.4;
         var paint = mix(painted, smoothstep(thr - 0.75, thr + 0.75, sp), max(vis1, 0.35)) * smoothstep(0.0, 0.15, painted);
@@ -244,7 +244,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         // fixed to the surface and travels with it
         let s0 = vec3f(d2, -bz);
         let ax = scn.cam.ev;
-        let th = (0.08 + P(27)) * u.time;
+        let th = (0.08 + P(P_BALL_SPIN)) * u.time;
         let sr = s0 * cos(th) + cross(ax, s0) * sin(th) + ax * dot(ax, s0) * (1.0 - cos(th));
         let sw = sr * sr * sr * sr;
         let swn = sw / (sw.x + sw.y + sw.z);
@@ -275,7 +275,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let fsz = 0.22 * (0.7 + 0.3 * hash12(fcell + 5.0));
         let fon = (1.0 - smoothstep(fsz - 0.08, fsz + 0.08, fd2)) * step(0.35, hash12(fcell + 3.0))
             * (1.0 - smoothstep(0.6, 1.4, bfpx / fc));
-        let tilt = hash22(fcell + 29.0) * (0.3 + P(30));
+        let tilt = hash22(fcell + 29.0) * (0.3 + P(P_FLAKE_TILT));
         let fn2 = d2 + tilt * bz;
         let glint = ball_lum(fn2 / max(length(fn2), 1.0) * 0.98);
         g = mix(g, max(glint, g * 0.8), fon * 0.65 * smoothstep(0.05, 0.25, bz));
@@ -298,7 +298,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let rh = bpl + rdir * rt;
         let rcov = rh.xy / max(rh.z, 1e-3) * FOCAL + 0.5;
         let rpos = pos_of(rcov);
-        let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * (4.0 + P(11) + 4.0 * pow(1.0 - bz, 2.0)) + 1.5 * fo;
+        let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * (4.0 + P(P_REFLECTION_BLUR) + 4.0 * pow(1.0 - bz, 2.0)) + 1.5 * fo;
         var refl = vec3f(0.0);
         if (rt > 0.0 && rh.z > 0.0 && rd2 < 1.0) {
             var rc = 0.0;
@@ -318,7 +318,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
             refl = mix(srgb(232.0, 60.0, 96.0), srgb(168.0, 137.0, 182.0) * rline, clamp(rc / max(rg, 1e-3) + 0.5, 0.0, 1.0));
         }
         // the lower half faces the liquid and mirrors its moving lines, strongest at grazing angles
-        let rk = smoothstep(0.08, 0.6, rden) * (0.16 + P(20) + 0.34 * pow(1.0 - bz, 2.0)) * (1.0 + 0.15 * gc);
+        let rk = smoothstep(0.08, 0.6, rden) * (0.16 + P(P_BALL_REFLECTION) + 0.34 * pow(1.0 - bz, 2.0)) * (1.0 + 0.15 * gc);
         var scol2 = mix(scol, refl * 1.1 + scol * 0.25, rk);
 
         // light bounced off the liquid tints the side facing it: the colour of the liquid that
@@ -335,7 +335,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
                 let cc = fl(clamp(bpos + o * spread, vec2f(fo), u.resolution - fo)).r;
                 acc += mix(srgb(236.0, 56.0, 80.0), band_avg, smoothstep(-0.3, 0.3, cc));
             }
-            scol2 += acc * (0.2 * (0.22 + P(15))) * smoothstep(0.02, 0.5, nd) * (1.0 - 0.6 * g);
+            scol2 += acc * (0.2 * (0.22 + P(P_BOUNCE_TINT))) * smoothstep(0.02, 0.5, nd) * (1.0 - 0.6 * g);
         }
 
         let liquid = clamp(c / gl * px + 0.5, 0.0, 1.0);          // 1 on bands and gaps, 0 on the stream
@@ -349,7 +349,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let side = max(near, low) * smoothstep(1.0, 0.96, rd2);
         scol2 *= 1.0 - 0.45 * side * exp(min(wl, 0.0) / 3.5);
         var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);
-        if (P(31) > 0.5) { cov *= 0.35; }
+        if (P(P_DEBUG_BALL_OUTLINE) > 0.5) { cov *= 0.35; }
         col = mix(col, scol2, cov);
         let ride = smoothstep(-0.3, 0.5, noised(vec2f(m * 0.8, 3.3)).x * 1.6 + 0.5 * noised(vec2f(m * 2.6, 9.1)).x);
         let facing = 0.3 + 0.7 * smoothstep(-0.5, 0.6, dot(-gh, LIGHT));
@@ -358,7 +358,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let lip = side * (1.0 - cov) * facing;
         col = mix(col, srgb(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
         col += srgb(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
-        if (P(31) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
+        if (P(P_DEBUG_BALL_OUTLINE) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
     }
 
     // glare round the two highlights, breathing a little as if light came through moving water
@@ -366,7 +366,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let h1 = length(cover - (BALL_C + BALL_R * vec2f(-0.43, -0.45))) / BALL_R;
     let h2 = length(cover - (BALL_C + BALL_R * vec2f(0.045, -0.57))) / BALL_R;
     let glow = (0.3 * exp(-pow(h1 / 0.42, 2.0)) + 0.07 * exp(-h1 / 0.45)
-              + 0.22 * exp(-pow(h2 / 0.2, 2.0)) + 0.04 * exp(-h2 / 0.3)) * fl1 * (1.0 + P(7));
+              + 0.22 * exp(-pow(h2 / 0.2, 2.0)) + 0.04 * exp(-h2 / 0.3)) * fl1 * (1.0 + P(P_GLARE_GAIN));
     col = 1.0 - (1.0 - col) * (1.0 - glow * srgb(255.0, 236.0, 250.0));
     return vec4f(col, 1.0);
 }

@@ -15,6 +15,38 @@ fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 
 fn P(i: i32) -> f32 { return u.params[i / 4][i % 4]; }
 
+const P_OBSTACLE_SCALE = 1;      // flow obstacle radius, relative
+const P_OBSTACLE_SHIFT_X = 2;    // obstacle centre shift across the ball, in ball radii
+const P_OBSTACLE_SHIFT_Y = 3;    // obstacle centre shift down the ball, in ball radii
+const P_EDDY_AMP_LARGE = 4;      // strength of the large eddies
+const P_EDDY_AMP_SMALL = 5;      // strength of the small eddies
+const P_SINUOUS_AMP = 6;         // strength of the slow sinuous swing
+const P_GLARE_GAIN = 7;          // brightness of the glare round the highlights
+const P_EDDY_LEN_X = 8;          // large eddy length along the flow
+const P_EDDY_LEN_Y = 9;          // large eddy length across the flow
+const P_EDDY_LEN_SMALL = 10;     // small eddy size
+const P_REFLECTION_BLUR = 11;    // blur of the liquid mirrored in the ball
+const P_EDDY_FADE_START = 12;    // where eddies begin fading out downstream
+const P_EDDY_FADE_END = 13;      // where eddies are gone and the pattern only drifts
+const P_EDDY_RISE_END = 14;      // where eddies reach full strength downstream of the ball
+const P_BOUNCE_TINT = 15;        // liquid colour bounced onto the ball
+const P_BAND_EDGE_TONE = 16;     // tone of the lit edge of a band
+const P_BAND_BODY_TONE = 17;     // tone of the body of a band
+const P_BALL_SHADOW = 18;        // darkness of the ball's shadow on the liquid
+const P_CORE_NOISE_DAMP = 19;    // eddy noise left along the stream core
+const P_BALL_REFLECTION = 20;    // strength of the liquid mirrored in the ball
+const P_WAKE_DEFICIT = 21;       // how much the liquid slows behind the ball
+const P_WAKE_WIDTH = 22;         // width of the slow wake
+const P_POOL_FLARE = 23;         // how far the stream flares round the obstacle
+const P_STREAM_HALF_WIDTH = 24;  // half width of the coloured stream
+const P_FAT_BAND_FLATTEN = 25;   // flattens airbrushed shading of fat bands
+const P_WAKE_START_SHIFT = 26;   // moves the wake onset downstream, in obstacle radii
+const P_BALL_SPIN = 27;          // turning rate of the ball
+const P_BAND_WIDTH_JITTER = 28;  // band width variation along the flow
+const P_SPRAY_MOTTLE = 29;       // raggedness of the far spray edge
+const P_FLAKE_TILT = 30;         // tilt spread of the ball's metallic flakes
+const P_DEBUG_BALL_OUTLINE = 31; // debug toggle: dims the ball, outlines its silhouette
+
 // Stripe-plane homography fitted to the cover: phi = (a x + b y + c) / (g x + h y + 1).
 const HA = 106.348;
 const HB = -65.956;
@@ -114,9 +146,9 @@ struct Scene {
 fn scene() -> Scene {
     var s: Scene;
     s.cam = camera();
-    let oc = BALL_C + BALL_R * vec2f(-0.12 + P(2), -0.25 + P(3));
+    let oc = BALL_C + BALL_R * vec2f(-0.12 + P(P_OBSTACLE_SHIFT_X), -0.25 + P(P_OBSTACLE_SHIFT_Y));
     s.qb = plane_q(s.cam, oc);
-    s.a = length(plane_q(s.cam, oc + vec2f(0.84 * BALL_R, 0.0)) - s.qb) * (1.0 + P(1));
+    s.a = length(plane_q(s.cam, oc + vec2f(0.84 * BALL_R, 0.0)) - s.qb) * (1.0 + P(P_OBSTACLE_SCALE));
     s.g = normalize(plane_q(s.cam, oc + vec2f(0.0, 0.01)) - s.qb);
     return s;
 }
