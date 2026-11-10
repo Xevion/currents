@@ -144,6 +144,9 @@ pub(crate) struct RenderArgs {
     /// Named view (full, wide, a..h, user) or x0,y0,x1,y1 in cover coordinates
     #[arg(long, default_value = "full", allow_hyphen_values = true)]
     pub(crate) view: View,
+    /// View the camera moves to over the frames at an even rate, given as for `--view`
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) to: Option<View>,
     /// Output size as WxH; defaults to 800 pixels tall at the view's aspect
     #[expect(clippy::doc_markdown, reason = "the help text must read WxH without backticks")]
     #[arg(long)]

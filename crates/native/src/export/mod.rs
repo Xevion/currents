@@ -18,7 +18,7 @@ use reference::Reference;
 use sink::Sink;
 use snafu::{ResultExt, Snafu, ensure};
 
-use crate::cli::{Common, OutputSize, RenderArgs};
+use crate::cli::{Common, OutputSize, RenderArgs, View};
 
 const COVER: &str = "references/stills/cover-apple-3000.jpg";
 
@@ -114,15 +114,19 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     let sink = target.sink(args.fps, encoding);
     let mut pass_sum = PassTimes::default();
     let mut wall_ms = 0.0;
+    let mut slowest = (0, 0.0f32);
 
     let begun = Instant::now();
+    let from = args.view.to_array();
+    let to = args.to.map_or(from, View::to_array);
     for frame in 0..args.frames {
+        let along = frame as f32 / (args.frames - 1).max(1) as f32;
         let uniforms = Uniforms::new(
             [size.width, size.height],
             ss,
             common.field_step,
             (args.time + frame as f32 / args.fps) * common.speed,
-            args.view.to_array(),
+            std::array::from_fn(|edge| from[edge] + (to[edge] - from[edge]) * along),
             common.param_array(),
         );
 
@@ -137,6 +141,10 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
         let pass = renderer.pass_ms(&device, true).unwrap_or_default();
         pass_sum.field += pass.field;
         pass_sum.shade += pass.shade;
+        // the first two frames trace the picture and then a whole key, as any run must
+        if frame >= 2 && pass.field + pass.shade > slowest.1 {
+            slowest = (frame, pass.field + pass.shade);
+        }
 
         let image = mapped.with_rows(|rows| downsample(rows, ss));
         drop(mapped);
@@ -150,6 +158,9 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     }
     sink.finish()?;
     print_summary(target.path(), size, ss, wall_ms, pass_sum, args.frames, begun.elapsed().as_secs_f32());
+    if args.frames > 2 {
+        println!("slowest frame after the first two: {:.2}ms on the GPU (frame {})", slowest.1, slowest.0);
+    }
     Ok(())
 }
 
