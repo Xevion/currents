@@ -17,7 +17,7 @@ use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -164,6 +164,7 @@ impl App {
     fn touch(&mut self, touch: Touch) {
         let Some(g) = self.gfx.as_ref() else { return };
         let viewport = g.viewport();
+        self.camera.hold(matches!(touch.phase, TouchPhase::Started | TouchPhase::Moved));
         match self.touches.event(touch.phase, touch.id, [touch.location.x, touch.location.y]) {
             Some(Gesture::Pan(delta)) => self.camera.pan(delta, viewport),
             Some(Gesture::Pinch { centre, pan, factor }) => {
@@ -232,6 +233,7 @@ impl ApplicationHandler<Started> for App {
             },
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 self.dragging = state == ElementState::Pressed;
+                self.camera.hold(self.dragging);
             },
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {

@@ -9,6 +9,18 @@ pub(crate) const PIXELS_PER_LINE: f32 = 40.0;
 const EASE_SECS: f32 = 0.08;
 /// Share of the view's height within which the shown view counts as arrived, well under a pixel.
 const ARRIVED: f32 = 2e-5;
+/// Seconds in which a view let go past the edge of its region closes most of the way back.
+const RETURN_SECS: f32 = 0.18;
+/// Furthest a view can be pushed past its region, as a share of its own size. The push meets
+/// more resistance the further it goes and never gets beyond this.
+const GIVE: f32 = 0.15;
+/// How far past the region input may ask for, in regions; only keeps the numbers finite.
+const REACH: f32 = 4.0;
+
+/// How far a push of `over` past an edge shows: one for one at first, levelling off at `GIVE`.
+fn give(over: f32) -> f32 {
+    GIVE * over / (over + GIVE)
+}
 
 /// Window size in pixels, as floats.
 #[derive(Clone, Copy)]
@@ -59,6 +71,28 @@ impl Framing {
         self
     }
 
+    /// This framing as it shows while pushed past the region: what lies inside is unchanged,
+    /// and what lies past an edge gives a little and then holds.
+    fn yielding(mut self, viewport: Viewport) -> Self {
+        let region = viewport.region();
+        let over = self.half_height / region[1] - 1.0;
+        if over > 0.0 {
+            self.half_height = region[1] * (1.0 + give(over));
+        }
+        self.half_height = self.half_height.max(MIN_HALF_HEIGHT);
+        let half = self.half(viewport);
+        for axis in 0..2 {
+            let slack = (region[axis] - half[axis]).max(0.0);
+            let offset = self.centre[axis] - 0.5;
+            let size = 2.0 * half[axis];
+            let past = (offset.abs() - slack) / size;
+            if past > 0.0 {
+                self.centre[axis] = 0.5 + offset.signum() * size.mul_add(give(past), slack);
+            }
+        }
+        self
+    }
+
     /// The framing `share` of the way from this one to `other`. Centre and extent move by the
     /// same share, so the point a zoom holds fixed stays fixed all the way there.
     fn toward(&self, other: &Self, share: f32) -> Self {
@@ -80,15 +114,20 @@ impl Framing {
 
 /// The visible rectangle of the cover. Input moves `target` at once; the view drawn eases
 /// after it, so a scroll notch or a jerk of the pointer reads as one smooth move.
+///
+/// The target may leave the region views stay in. The view drawn follows it a little way past
+/// the edge, and the target drifts back inside whenever nothing holds it there.
 #[derive(Clone, Copy)]
 pub(crate) struct Camera {
     target: Framing,
     shown: Framing,
+    /// Whether a drag is in progress, which keeps the target where it was put.
+    held: bool,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Self { target: Framing::WHOLE, shown: Framing::WHOLE }
+        Self { target: Framing::WHOLE, shown: Framing::WHOLE, held: false }
     }
 }
 
@@ -102,20 +141,34 @@ impl Camera {
         self.target = Framing::WHOLE;
     }
 
-    /// Moves the drawn view toward the target over `dt` seconds, and keeps the target inside
-    /// the region for a window that may have changed shape.
+    /// Marks whether a drag holds the view; once let go, a view past the edge comes back.
+    pub(crate) fn hold(&mut self, held: bool) {
+        self.held = held;
+    }
+
+    /// Moves the drawn view toward the target over `dt` seconds, after letting a target that
+    /// nothing holds past the edge drift back inside.
     pub(crate) fn advance(&mut self, dt: f32, viewport: Viewport) {
-        self.target = self.target.bounded(viewport);
-        let next = self.shown.toward(&self.target, 1.0 - (-dt / EASE_SECS).exp()).bounded(viewport);
-        self.shown = if next.arrived_at(&self.target) { self.target } else { next };
+        if !self.held {
+            let inside = self.target.bounded(viewport);
+            let next = self.target.toward(&inside, 1.0 - (-dt / RETURN_SECS).exp());
+            self.target = if next.arrived_at(&inside) { inside } else { next };
+        }
+        let goal = self.target.yielding(viewport);
+        let next = self.shown.toward(&goal, 1.0 - (-dt / EASE_SECS).exp());
+        self.shown = if next.arrived_at(&goal) { goal } else { next };
     }
 
     /// Drags the picture along with a cursor that moved by `delta` pixels.
     pub(crate) fn pan(&mut self, delta: [f64; 2], viewport: Viewport) {
         let half = self.target.half(viewport);
-        self.target.centre[0] -= delta[0] as f32 / viewport.width * 2.0 * half[0];
-        self.target.centre[1] -= delta[1] as f32 / viewport.height * 2.0 * half[1];
-        self.target = self.target.bounded(viewport);
+        let region = viewport.region();
+        let moved =
+            [delta[0] as f32 / viewport.width * 2.0 * half[0], delta[1] as f32 / viewport.height * 2.0 * half[1]];
+        for axis in 0..2 {
+            let reach = REACH * region[axis];
+            self.target.centre[axis] = (self.target.centre[axis] - moved[axis]).clamp(0.5 - reach, 0.5 + reach);
+        }
     }
 
     /// Zooms in by `lines` scroll lines (out when negative), keeping the point under `cursor` fixed.
@@ -123,16 +176,15 @@ impl Camera {
         self.scale_extent(ZOOM_PER_LINE.powf(-lines), cursor, viewport);
     }
 
-    /// Multiplies the visible extent by `factor`, keeping the point under `cursor` fixed
-    /// unless that would take the view out of its region.
+    /// Multiplies the visible extent by `factor`, keeping the point under `cursor` fixed.
     pub(crate) fn scale_extent(&mut self, factor: f32, cursor: [f64; 2], viewport: Viewport) {
         let ndc = [cursor[0] as f32 / viewport.width * 2.0 - 1.0, cursor[1] as f32 / viewport.height * 2.0 - 1.0];
         let before = self.target.half(viewport);
         let anchor = [self.target.centre[0] + ndc[0] * before[0], self.target.centre[1] + ndc[1] * before[1]];
-        self.target.half_height = (self.target.half_height * factor).clamp(MIN_HALF_HEIGHT, viewport.region()[1]);
+        let widest = REACH * viewport.region()[1];
+        self.target.half_height = (self.target.half_height * factor).clamp(MIN_HALF_HEIGHT, widest);
         let after = self.target.half(viewport);
         self.target.centre = [anchor[0] - ndc[0] * after[0], anchor[1] - ndc[1] * after[1]];
-        self.target = self.target.bounded(viewport);
     }
 }
 
@@ -160,7 +212,7 @@ mod tests {
 
     fn at(centre: [f32; 2], half_height: f32) -> Camera {
         let framing = Framing { centre, half_height };
-        Camera { target: framing, shown: framing }
+        Camera { target: framing, shown: framing, held: false }
     }
 
     #[rstest]
@@ -188,10 +240,14 @@ mod tests {
     #[rstest]
     #[case::zoom_in(100.0, MIN_HALF_HEIGHT)]
     #[case::zoom_out(-100.0, 0.5)]
-    fn zoom_stops_at_the_limits(#[case] lines: f32, #[case] limit: f32) {
+    fn zoom_comes_to_rest_at_the_limits(#[case] lines: f32, #[case] limit: f32) {
+        let viewport = Viewport::new(900, 900);
         let mut camera = Camera::default();
-        camera.zoom(lines, [100.0, 200.0], Viewport::new(900, 900));
-        check!(camera.target.half_height.total_cmp(&limit).is_eq());
+        camera.zoom(lines, [100.0, 200.0], viewport);
+        for _ in 0..600 {
+            camera.advance(1.0 / 60.0, viewport);
+        }
+        check!(camera.shown.half_height.total_cmp(&limit).is_eq());
     }
 
     #[rstest]
@@ -207,24 +263,39 @@ mod tests {
         check!(close(camera.target.centre[1], 0.5 - visible[1] / 4.0));
     }
 
+    /// Whether `view` lies within the region grown by `give` of its own size on each side.
+    fn within(view: [f32; 4], viewport: Viewport, give: f32) -> bool {
+        let region = viewport.region();
+        (0..2).all(|axis| {
+            let allowed = give.mul_add(view[axis + 2] - view[axis], region[axis]) + TOLERANCE;
+            view[axis] >= 0.5 - allowed && view[axis + 2] <= 0.5 + allowed
+        })
+    }
+
     #[rstest]
-    fn the_view_never_leaves_the_smallest_window_shaped_region_holding_the_cover(
+    fn a_view_pushed_past_the_region_gives_a_little_and_comes_back_when_let_go(
         #[values((900, 900), (1600, 600), (500, 1000))] size: (u32, u32),
         #[values([1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0], [1.0, 1.0])] toward: [f64; 2],
         #[values(-100.0, -3.0, 4.0)] lines: f32,
     ) {
         let viewport = Viewport::new(size.0, size.1);
-        let region = viewport.region();
         let mut camera = Camera::default();
+        camera.hold(true);
         camera.zoom(lines, [0.0, 0.0], viewport);
         camera.pan(toward.map(|v| v * 1e6), viewport);
         for _ in 0..200 {
             camera.advance(1.0 / 60.0, viewport);
-            let view = camera.view(viewport).to_array();
-            check!(view[0] >= 0.5 - region[0] - TOLERANCE && view[2] <= 0.5 + region[0] + TOLERANCE);
-            check!(view[1] >= 0.5 - region[1] - TOLERANCE && view[3] <= 0.5 + region[1] + TOLERANCE);
+            // a zoom past the limit and a pan past the edge each give at most GIVE
+            check!(within(camera.view(viewport).to_array(), viewport, 2.0 * GIVE));
         }
+        check!(!within(camera.view(viewport).to_array(), viewport, 0.0));
+        camera.hold(false);
+        for _ in 0..600 {
+            camera.advance(1.0 / 60.0, viewport);
+        }
+        check!(within(camera.view(viewport).to_array(), viewport, 0.0));
         // the cover fits the region exactly along the window's short side
+        let region = viewport.region();
         check!(close(region[0].min(region[1]), 0.5));
     }
 
