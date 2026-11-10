@@ -66,7 +66,7 @@ const STAGES: &[Stage] = &[
     Stage {
         pass: PassKind::Field,
         name: "key read",
-        edits: &[("liquid = key_liquid(rel + acc.xy, scn);", "liquid = rel + acc.xy;")],
+        edits: &[("liquid = key_liquid(rel + acc.xy, scn, false);", "liquid = rel + acc.xy;")],
     },
     Stage {
         pass: PassKind::Field,

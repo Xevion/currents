@@ -149,8 +149,10 @@ fn step_back(y: vec2f, t: f32, dt: f32, scn: Scene) -> vec2f {
 // rather than read off the chord, which cuts the corner where the flow bends round the ball.
 fn liquid_at_inflow(y: vec2f, d: f32, dn: f32, t: f32, dt: f32, scn: Scene) -> vec2f {
     let first = dt * d / (d - dn);
-    // one correction for the flow speeding up or slowing down across the step
-    let part = first * d / (d - inflow_distance(step_back(y, t, first, scn), scn));
+    // one correction for the flow speeding up or slowing down across the step, kept within
+    // it: where the liquid barely nears the line over `first`, the correction would run away
+    let gained = d - inflow_distance(step_back(y, t, first, scn), scn);
+    let part = clamp(first * d / max(gained, 1e-6), 0.0, dt);
     return steady_liquid(step_back(y, t, part, scn), t - part, scn);
 }
 
@@ -222,12 +224,21 @@ fn hop_back(p: vec2f, scn: Scene) -> Hop {
     return o;
 }
 
-// The liquid that was at y at the key's time.
-fn key_liquid(y: vec2f, scn: Scene) -> vec2f {
+// The liquid that was at y at the key's time. A frame blends the four texels round the
+// point, which places a line within a few hundredths of a pixel. A key carried forward
+// (`exact`) is read again by every key after it, so it takes the cubic through sixteen.
+fn key_liquid(y: vec2f, scn: Scene, exact: bool) -> vec2f {
     let cover = plane_to_cover(scn.cam, y + scn.centre);
     let g = (cover - u.key_view.xy) / (u.key_view.zw - u.key_view.xy) * u.key_size - 0.5;
     let cell = floor(g);
     if (any(cell < vec2f(1.0)) || any(cell > u.key_size - 3.0)) { return traced(y, u.key_time, scn); }
+    if (!exact) {
+        let f = g - cell;
+        let at = vec2i(cell);
+        let top = mix(textureLoad(key, at, 0).xy, textureLoad(key, at + vec2i(1, 0), 0).xy, f.x);
+        let bottom = mix(textureLoad(key, at + vec2i(0, 1), 0).xy, textureLoad(key, at + vec2i(1, 1), 0).xy, f.x);
+        return mix(top, bottom, f.y);
+    }
     let wx = catmull_rom(g.x - cell.x);
     let wy = catmull_rom(g.y - cell.y);
     var acc = vec2f(0.0);
@@ -242,10 +253,10 @@ fn key_liquid(y: vec2f, scn: Scene) -> vec2f {
 }
 
 // The liquid at p now, by way of the key.
-fn carried(p: vec2f, scn: Scene) -> vec2f {
+fn carried(p: vec2f, scn: Scene, exact: bool) -> vec2f {
     let hop = hop_back(p, scn);
     if (hop.steady) { return hop.liquid; }
-    return key_liquid(hop.at, scn);
+    return key_liquid(hop.at, scn, exact);
 }
 
 // On-screen velocity of the liquid at rel, in reference pixels per unit time.
@@ -284,7 +295,7 @@ fn fs_hop(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 fn fs_key(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let scn = scene();
     let rel = cover_to_plane(scn.cam, pos_to_cover(pos.xy)) - scn.centre;
-    if (u.key_size.x > 0.0) { return vec4f(carried(rel, scn), 0.0, 0.0); }
+    if (u.key_size.x > 0.0) { return vec4f(carried(rel, scn, true), 0.0, 0.0); }
     return vec4f(traced(rel, u.time, scn), 0.0, 0.0);
 }
 
@@ -307,9 +318,9 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let whole = max(max(h00.x, h10.x), max(h01.x, h11.x)) < 0.5 * NO_HOP;
         // by a hop that ended in the steady flow, each texel follows its own liquid back
         if (whole) {
-            liquid = key_liquid(rel + acc.xy, scn);
+            liquid = key_liquid(rel + acc.xy, scn, false);
         } else {
-            liquid = carried(rel, scn);
+            liquid = carried(rel, scn, false);
         }
         if (all(abs(acc.zw) < vec2f(1e9))) {
             vs = acc.zw;
