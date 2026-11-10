@@ -147,6 +147,7 @@ impl App {
         let dt = self.advance_clock(now);
         let Some(g) = self.gfx.as_mut() else { return };
         g.observe_frame(dt);
+        self.camera.advance(dt, g.viewport());
         let uniforms = frame_uniforms(&self.settings, &self.camera, self.time, g);
         if let Some(frame) = g.acquire() {
             let passes = g.draw(frame, &uniforms, self.view);
