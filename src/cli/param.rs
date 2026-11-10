@@ -48,3 +48,49 @@ impl ParamOverride {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::plain("3=0.5", 3, 0.5)]
+    #[case::negative_value("0=-2", 0, -2.0)]
+    #[case::last_slot("31=1", 31, 1.0)]
+    fn parses_index_and_value(#[case] input: &str, #[case] slot: usize, #[case] value: f32) {
+        assert!(let Ok(parsed) = input.parse::<ParamOverride>());
+        check!(parsed.slot == slot);
+        check!(parsed.value.total_cmp(&value).is_eq());
+    }
+
+    #[rstest]
+    #[case::no_equals("5", "shape")]
+    #[case::first_slot_past_the_end("32=1", "range")]
+    #[case::non_numeric_slot("x=1", "slot")]
+    #[case::negative_slot("-1=1", "slot")]
+    #[case::bad_value("1=y", "value")]
+    #[case::empty_value("1=", "value")]
+    fn rejects_malformed_overrides(#[case] input: &str, #[case] kind: &str) {
+        assert!(let Err(error) = input.parse::<ParamOverride>());
+        let got = match error {
+            Error::Shape => "shape",
+            Error::Slot { .. } => "slot",
+            Error::Range => "range",
+            Error::Value { .. } => "value",
+        };
+        check!(got == kind);
+    }
+
+    #[test]
+    fn pack_puts_each_override_in_its_slot_and_the_last_one_wins() {
+        let overrides: Vec<ParamOverride> = ["0=1", "5=2", "5=3", "31=4"].iter().map(|s| s.parse().unwrap()).collect();
+        let mut expected = [[0.0; 4]; PARAM_SLOTS / 4];
+        expected[0][0] = 1.0;
+        expected[1][1] = 3.0;
+        expected[7][3] = 4.0;
+        check!(ParamOverride::pack(&overrides) == expected);
+    }
+}

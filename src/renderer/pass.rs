@@ -24,7 +24,7 @@ impl Pass {
         let src = read_shader(&dir.join(format!("{name}.wgsl")))?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),
-            source: wgpu::ShaderSource::Wgsl(format!("{common}\n{src}").into()),
+            source: wgpu::ShaderSource::Wgsl(assemble(common, &src).into()),
         });
         let mut entries = vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -86,6 +86,11 @@ impl Pass {
     }
 }
 
+/// The source a pass is compiled from: the shared declarations followed by the pass itself.
+fn assemble(common: &str, pass: &str) -> String {
+    format!("{common}\n{pass}")
+}
+
 pub(super) fn read_shader(path: &Path) -> Result<String, Error> {
     let src = std::fs::read_to_string(path).context(ReadShaderSnafu { path })?;
     debug!(path = %path.display(), bytes = src.len(), "loaded shader");
@@ -114,4 +119,22 @@ pub(crate) fn draw_fullscreen(
     rp.set_pipeline(pipeline);
     rp.set_bind_group(0, bind, &[]);
     rp.draw(0..3, 0..1);
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::shader_check::validate;
+
+    #[rstest]
+    #[case("field")]
+    #[case("shade")]
+    fn pass_shaders_validate(#[case] name: &str) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
+        let common = read_shader(&dir.join("common.wgsl")).unwrap();
+        let pass = read_shader(&dir.join(format!("{name}.wgsl"))).unwrap();
+        validate(name, &assemble(&common, &pass));
+    }
 }

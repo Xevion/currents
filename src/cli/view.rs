@@ -87,3 +87,31 @@ impl FromStr for View {
         Ok(Self::new(coord(x0)?, coord(y0)?, coord(x1)?, coord(y1)?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::named_pixel_view("a", [0.4, 0.493_333_3, 0.68, 0.773_333_3])]
+    #[case::negatives("-0.25,-0.5,1.5,2", [-0.25, -0.5, 1.5, 2.0])]
+    #[case::plain("0.1,0.2,0.3,0.4", [0.1, 0.2, 0.3, 0.4])]
+    fn parses_names_and_coordinates(#[case] input: &str, #[case] expected: [f32; 4]) {
+        assert!(let Ok(view) = input.parse::<View>());
+        check!(view.to_array().iter().zip(expected).all(|(got, want)| (got - want).abs() < 1e-6));
+    }
+
+    #[rstest]
+    #[case::unknown_name("nope", true)]
+    #[case::empty("", true)]
+    #[case::three_parts("1,2,3", true)]
+    #[case::five_parts("1,2,3,4,5", true)]
+    #[case::not_a_number("1,2,x,4", false)]
+    fn rejects_malformed_views(#[case] input: &str, #[case] wrong_shape: bool) {
+        assert!(let Err(error) = input.parse::<View>());
+        check!(matches!(error, Error::Shape) == wrong_shape);
+    }
+}

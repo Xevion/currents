@@ -2,6 +2,8 @@ mod cli;
 mod export;
 mod gpu;
 mod renderer;
+#[cfg(test)]
+mod shader_check;
 mod viewer;
 
 use clap::Parser;

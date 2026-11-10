@@ -60,3 +60,13 @@ impl Blit {
         draw_fullscreen(enc, target, &self.pipeline, bind, None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::shader_check::validate;
+
+    #[test]
+    fn blit_shader_validates() {
+        validate("blit", include_str!("blit.wgsl"));
+    }
+}
