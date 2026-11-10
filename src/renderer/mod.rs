@@ -1,12 +1,20 @@
 mod pass;
 mod timing;
 
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
-use pass::Pass;
 pub(crate) use pass::draw_fullscreen;
+use pass::{Pass, read_shader};
+use snafu::Snafu;
 pub(crate) use timing::PassTimes;
 use timing::Timing;
+
+#[derive(Debug, Snafu)]
+pub(crate) enum Error {
+    #[snafu(display("could not read shader {}", path.display()))]
+    ReadShader { path: PathBuf, source: io::Error },
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -65,18 +73,18 @@ fn make_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) 
 }
 
 impl Renderer {
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, shader_dir: &Path) -> Self {
-        let common = std::fs::read_to_string(shader_dir.join("common.wgsl")).expect("common.wgsl");
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, shader_dir: &Path) -> Result<Self, Error> {
+        let common = read_shader(&shader_dir.join("common.wgsl"))?;
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self {
+        Ok(Self {
             ubuf,
-            field: Pass::new(device, &common, shader_dir, "field", 0, FIELD_FORMAT),
-            shade: Pass::new(device, &common, shader_dir, "shade", 1, COLOR_FORMAT),
+            field: Pass::new(device, &common, shader_dir, "field", 0, FIELD_FORMAT)?,
+            shade: Pass::new(device, &common, shader_dir, "shade", 1, COLOR_FORMAT)?,
             targets: None,
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 mag_filter: wgpu::FilterMode::Linear,
@@ -84,7 +92,7 @@ impl Renderer {
                 ..Default::default()
             }),
             timing: Timing::new(device, queue),
-        }
+        })
     }
 
     /// Call after submitting the encoder passed to `render`: starts reading back its timestamps.
@@ -141,7 +149,7 @@ impl Renderer {
         };
         self.ensure_targets(device, size);
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(uniforms));
-        let t = self.targets.as_ref().unwrap();
+        let t = self.targets.as_ref().expect("ensure_targets left the targets unset");
         let writes = |pass| self.timing.as_ref().map(|tm| tm.pass_writes(pass));
         draw_fullscreen(enc, &t.field_view, &self.field.pipeline, &t.field_bind, writes(0));
         draw_fullscreen(enc, &t.color_view, &self.shade.pipeline, &t.shade_bind, writes(1));
@@ -151,10 +159,10 @@ impl Renderer {
     }
 
     pub(crate) fn color(&self) -> &wgpu::Texture {
-        &self.targets.as_ref().expect("render first").color
+        &self.targets.as_ref().expect("colour target requested before the first render").color
     }
 
     pub(crate) fn color_view(&self) -> &wgpu::TextureView {
-        &self.targets.as_ref().expect("render first").color_view
+        &self.targets.as_ref().expect("colour target requested before the first render").color_view
     }
 }

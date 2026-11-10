@@ -1,5 +1,10 @@
 use std::path::Path;
 
+use snafu::ResultExt;
+use tracing::debug;
+
+use super::{Error, ReadShaderSnafu};
+
 pub(super) struct Pass {
     pub(super) pipeline: wgpu::RenderPipeline,
     pub(super) layout: wgpu::BindGroupLayout,
@@ -15,9 +20,8 @@ impl Pass {
         name: &str,
         inputs: u32,
         format: wgpu::TextureFormat,
-    ) -> Self {
-        let src =
-            std::fs::read_to_string(dir.join(format!("{name}.wgsl"))).unwrap_or_else(|e| panic!("{name}.wgsl: {e}"));
+    ) -> Result<Self, Error> {
+        let src = read_shader(&dir.join(format!("{name}.wgsl")))?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(format!("{common}\n{src}").into()),
@@ -78,8 +82,14 @@ impl Pass {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        Ok(Self { pipeline, layout })
     }
+}
+
+pub(super) fn read_shader(path: &Path) -> Result<String, Error> {
+    let src = std::fs::read_to_string(path).context(ReadShaderSnafu { path })?;
+    debug!(path = %path.display(), bytes = src.len(), "loaded shader");
+    Ok(src)
 }
 
 /// Clears `target` to black, then draws one fullscreen triangle with `pipeline` and `bind`.

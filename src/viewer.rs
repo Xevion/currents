@@ -8,7 +8,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::Common;
+use crate::cli::{Common, View};
 use crate::gpu::{self, Gpu};
 use crate::renderer::{PassTimes, Renderer, Uniforms, draw_fullscreen};
 
@@ -83,12 +83,7 @@ impl App {
             resolution: [(g.config.width * ss) as f32, (g.config.height * ss) as f32],
             time: self.time,
             field_scale: ss as f32,
-            view: [
-                self.centre[0] - half[0],
-                self.centre[1] - half[1],
-                self.centre[0] + half[0],
-                self.centre[1] + half[1],
-            ],
+            view: View::from_centre(self.centre, half).to_array(),
             params: self.common.param_array(),
         };
         let frame = match g.surface.get_current_texture() {
@@ -135,6 +130,11 @@ impl App {
     }
 }
 
+fn abort(el: &ActiveEventLoop, error: &(impl std::error::Error + 'static)) {
+    tracing::error!(error = %snafu::Report::from_error(error), "could not start the viewer");
+    el.exit();
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.gfx.is_some() {
@@ -143,7 +143,10 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes().with_title("currents").with_inner_size(LogicalSize::new(900, 900));
         let window = Arc::new(el.create_window(attrs).expect("window"));
         let surface = self.instance.create_surface(window.clone()).expect("surface");
-        let Gpu { adapter, device, queue } = gpu::request(&self.instance, Some(&surface));
+        let Gpu { adapter, device, queue } = match gpu::request(&self.instance, Some(&surface)) {
+            Ok(gpu) => gpu,
+            Err(error) => return abort(el, &error),
+        };
         let size = window.inner_size();
         let mut config =
             surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
@@ -183,7 +186,10 @@ impl ApplicationHandler for App {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let renderer = Renderer::new(&device, &queue, &self.common.shaders);
+        let renderer = match Renderer::new(&device, &queue, &self.common.shaders) {
+            Ok(renderer) => renderer,
+            Err(error) => return abort(el, &error),
+        };
         self.last = Instant::now();
         self.gfx = Some(Gfx { window, surface, config, device, queue, renderer, blit, sampler });
     }

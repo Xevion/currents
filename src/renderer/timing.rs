@@ -90,10 +90,13 @@ impl Timing {
     pub(super) fn latest(&mut self, device: &wgpu::Device, wait: bool) -> Option<PassTimes> {
         if self.mapping {
             let poll = if wait { wgpu::PollType::wait_indefinitely() } else { wgpu::PollType::Poll };
-            device.poll(poll).unwrap();
+            device.poll(poll).expect("polling without a submission index cannot fail");
         }
         if self.ready.swap(false, Ordering::Acquire) {
-            let ticks: Vec<u64> = bytemuck::cast_slice(&self.read.slice(..).get_mapped_range().unwrap()).to_vec();
+            let ticks: Vec<u64> = bytemuck::cast_slice(
+                &self.read.slice(..).get_mapped_range().expect("readback buffer is mapped once ready is set"),
+            )
+            .to_vec();
             self.read.unmap();
             self.mapping = false;
             let ms = |i: usize| ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f32 * self.period_ns * 1e-6;
