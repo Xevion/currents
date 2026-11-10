@@ -1,0 +1,265 @@
+//! Reading the settings file forgivingly and writing back only what changed, so a file someone
+//! edited by hand keeps its comments, order and unknown keys.
+
+use snafu::{ResultExt, Snafu};
+use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
+
+use super::keys::Chord;
+use super::{Issue, Settings};
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("the file is not valid TOML"))]
+    Parse { source: toml_edit::TomlError },
+}
+
+type Path = Vec<String>;
+
+/// `settings` as a TOML table, each float written at the precision it is stored in.
+fn tree(settings: &Settings) -> Table {
+    let mut doc = toml_edit::ser::to_document(settings).expect("settings always serialise").as_table().clone();
+    normalise(&mut doc);
+    doc
+}
+
+fn normalise(table: &mut dyn TableLike) {
+    for (_, item) in table.iter_mut() {
+        if let Some(sub) = item.as_table_like_mut() {
+            normalise(sub);
+        } else if let Some(Value::Float(f)) = item.as_value_mut() {
+            // The settings hold f32; widening 0.4 to f64 would write 0.4000000059604645.
+            let short: f64 = (*f.value() as f32).to_string().parse().unwrap_or_else(|_| *f.value());
+            *f = toml_edit::Formatted::new(short);
+        }
+    }
+}
+
+fn leaves(table: &dyn TableLike, prefix: &mut Path, out: &mut Vec<(Path, Value)>) {
+    for (key, item) in table.iter() {
+        prefix.push(key.to_owned());
+        if let Some(sub) = item.as_table_like() {
+            leaves(sub, prefix, out);
+        } else if let Some(value) = item.as_value() {
+            out.push((prefix.clone(), value.clone()));
+        }
+        prefix.pop();
+    }
+}
+
+fn leaves_of(table: &dyn TableLike) -> Vec<(Path, Value)> {
+    let mut out = Vec::new();
+    leaves(table, &mut Vec::new(), &mut out);
+    out
+}
+
+fn lookup<'a>(table: &'a dyn TableLike, path: &[String]) -> Option<&'a Item> {
+    let (last, parents) = path.split_last()?;
+    let mut table = table;
+    for key in parents {
+        table = table.get(key)?.as_table_like()?;
+    }
+    table.get(last)
+}
+
+/// The value as it reads in a file, without the spacing and comments around it.
+fn bare(value: &Value) -> String {
+    let mut value = value.clone();
+    value.decor_mut().clear();
+    value.to_string()
+}
+
+/// `found` in the type `default` has, if it can be read as one.
+fn conformed(found: &Value, default: &Value) -> Option<Value> {
+    match (found, default) {
+        (Value::Boolean(_), Value::Boolean(_))
+        | (Value::Integer(_), Value::Integer(_))
+        | (Value::Float(_), Value::Float(_)) => Some(found.clone()),
+        (Value::Integer(i), Value::Float(_)) => Some(Value::from(*i.value() as f64)),
+        (Value::String(s), Value::String(_)) => s.value().parse::<Chord>().is_ok().then(|| found.clone()),
+        _ => None,
+    }
+}
+
+fn describe(value: &Value) -> &'static str {
+    match value {
+        Value::String(_) => "text",
+        Value::Integer(_) => "a whole number",
+        Value::Float(_) => "a number",
+        Value::Boolean(_) => "true or false",
+        Value::Datetime(_) => "a date",
+        Value::Array(_) => "a list",
+        Value::InlineTable(_) => "a table",
+    }
+}
+
+fn issue(path: &[String], message: impl Into<String>) -> Issue {
+    Issue { path: path.join("."), message: message.into() }
+}
+
+/// Reads a settings file. A key with an unusable value falls back to its default and an
+/// unknown key is skipped; each is reported. Only text that is not TOML at all fails.
+pub fn load(text: &str) -> Result<(Settings, Vec<Issue>), Error> {
+    let doc: DocumentMut = text.parse().context(ParseSnafu)?;
+    let defaults = tree(&Settings::default());
+    let mut merged = defaults.clone();
+    let mut issues = Vec::new();
+
+    for (path, default) in leaves_of(&defaults) {
+        let Some(found) = lookup(doc.as_table(), &path) else { continue };
+        let Some(found) = found.as_value().filter(|v| v.as_inline_table().is_none()) else {
+            issues.push(issue(&path, format!("expected {}; using the default", describe(&default))));
+            continue;
+        };
+        match conformed(found, &default) {
+            Some(value) => set(&mut merged, &path, value),
+            None if matches!(default, Value::String(_)) => {
+                issues.push(issue(&path, format!("{} is not a key chord; using the default", bare(found))));
+            },
+            None => issues.push(issue(&path, format!("expected {}; using the default", describe(&default)))),
+        }
+    }
+    for (path, _) in leaves_of(doc.as_table()) {
+        if lookup(&defaults, &path).is_none() {
+            issues.push(issue(&path, "unknown setting; ignored"));
+        }
+    }
+
+    let mut settings: Settings = match toml_edit::de::from_document(DocumentMut::from(merged)) {
+        Ok(settings) => settings,
+        Err(error) => {
+            issues.push(issue(&[], format!("could not be read ({error}); using every default")));
+            Settings::default()
+        },
+    };
+    issues.extend(settings.clamp());
+    Ok((settings, issues))
+}
+
+/// Writes `value` at `path`, keeping the comments around a value it replaces and making the
+/// tables on the way as plain `[section]` headers.
+fn set(table: &mut dyn TableLike, path: &[String], value: Value) {
+    let Some((last, parents)) = path.split_last() else { return };
+    let mut table = table;
+    for key in parents {
+        let entry = table.entry(key).or_insert_with(|| Item::Table(Table::new()));
+        if entry.as_table_like().is_none() {
+            *entry = Item::Table(Table::new());
+        }
+        table = entry.as_table_like_mut().expect("made a table just above");
+    }
+    let mut value = value;
+    if let Some(old) = table.get(last).and_then(Item::as_value) {
+        *value.decor_mut() = old.decor().clone();
+    } else {
+        value.decor_mut().clear();
+    }
+    table.insert(last, Item::Value(value));
+}
+
+/// Writes into `doc` every setting that differs between `old` and `new`, and nothing else;
+/// true when anything was written.
+pub fn write_back(doc: &mut DocumentMut, old: &Settings, new: &Settings) -> bool {
+    write(doc, Some(&tree(old)), new)
+}
+
+/// The whole of `settings` as a settings file.
+pub fn to_string(settings: &Settings) -> String {
+    let mut doc = DocumentMut::new();
+    write(&mut doc, None, settings);
+    doc.to_string()
+}
+
+fn write(doc: &mut DocumentMut, old: Option<&Table>, new: &Settings) -> bool {
+    let mut changed = false;
+    for (path, value) in leaves_of(&tree(new)) {
+        let before = old.and_then(|t| lookup(t, &path)).and_then(Item::as_value).map(bare);
+        if before.as_deref() != Some(bare(&value).as_str()) {
+            set(doc.as_table_mut(), &path, value);
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+
+    use super::*;
+
+    const HAND_EDITED: &str = r#"# my wallpaper setup
+[render]
+fps_cap = 30   # laptop on battery
+# temporal stays on
+
+[motion]
+speed = 0.25
+
+[keys]
+toggle_menu = "F1"
+
+[extra]
+mine = "kept"
+"#;
+
+    #[test]
+    fn a_hand_edited_file_loads_what_it_says() {
+        assert!(let Ok((settings, issues)) = load(HAND_EDITED));
+        check!(settings.render.fps_cap == 30);
+        check!(settings.motion.speed.total_cmp(&0.25).is_eq());
+        check!(settings.keys.toggle_menu.to_string() == "F1");
+        check!(issues.iter().map(|i| i.path.as_str()).collect::<Vec<_>>() == ["extra.mine"]);
+    }
+
+    #[test]
+    fn writing_back_unchanged_settings_leaves_the_file_byte_for_byte() {
+        let (settings, _) = load(HAND_EDITED).unwrap();
+        let mut doc: DocumentMut = HAND_EDITED.parse().unwrap();
+        check!(!write_back(&mut doc, &settings, &settings));
+        check!(doc.to_string() == HAND_EDITED);
+    }
+
+    #[test]
+    fn writing_back_touches_only_the_changed_keys() {
+        let (old, _) = load(HAND_EDITED).unwrap();
+        let mut new = old.clone();
+        new.render.fps_cap = 60;
+        new.motion.speed = 0.4;
+        new.wallpaper.hint = false;
+        let mut doc: DocumentMut = HAND_EDITED.parse().unwrap();
+        check!(write_back(&mut doc, &old, &new));
+        let expected = HAND_EDITED
+            .replace("fps_cap = 30   # laptop on battery", "fps_cap = 60   # laptop on battery")
+            .replace("speed = 0.25", "speed = 0.4")
+            + "\n[wallpaper]\nhint = false\n";
+        check!(doc.to_string() == expected);
+        check!(load(&doc.to_string()).unwrap().0 == new);
+    }
+
+    #[test]
+    fn unusable_values_fall_back_one_key_at_a_time() {
+        let text =
+            "[render]\nfps_cap = \"lots\"\nsupersampling = 2\n[keys]\npause = \"Ctrl+Banana\"\n[motion]\nspeed = 1\n";
+        assert!(let Ok((settings, issues)) = load(text));
+        check!(settings.render.fps_cap == 0);
+        check!(settings.render.supersampling == 2);
+        check!(settings.keys.pause == Settings::default().keys.pause);
+        check!(settings.motion.speed.total_cmp(&1.0).is_eq());
+        let paths: Vec<_> = issues.iter().map(|i| i.path.as_str()).collect();
+        check!(paths == ["render.fps_cap", "keys.pause"]);
+    }
+
+    #[test]
+    fn text_that_is_not_toml_is_refused() {
+        check!(load("[render\nfps_cap = ").is_err());
+    }
+
+    #[test]
+    fn params_are_stored_by_name() {
+        let mut settings = Settings::default();
+        *settings.params.get_mut(27) = 0.5;
+        let text = to_string(&settings);
+        check!(text.contains("ball_spin = 0.5"));
+        check!(load(&text).unwrap().0 == settings);
+    }
+}

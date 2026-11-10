@@ -31,7 +31,7 @@ impl FrameCounter {
             return None;
         }
         let state = if paused { "paused" } else { "running" };
-        let view = view.map_or("shaded", FieldView::name);
+        let view: &str = view.map_or("shaded", Into::into);
         let PassTimes { field: f, shade: s } = passes;
         let title = format!(
             "currents | {:.0} fps | field {f:.1}ms shade {s:.1}ms | t={time:.1} | {state} | {view}",

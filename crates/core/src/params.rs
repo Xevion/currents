@@ -9,7 +9,7 @@ pub const PARAM_SLOTS: usize = 32;
 /// The tuning parameters as the shaders' uniform block lays them out.
 pub type ParamBlock = [[f32; 4]; PARAM_SLOTS / 4];
 
-/// One `INDEX=VALUE` tuning override.
+/// One `INDEX=VALUE` or `NAME=VALUE` tuning override.
 #[derive(Clone, Copy, Debug)]
 pub struct ParamOverride {
     slot: usize,
@@ -18,10 +18,10 @@ pub struct ParamOverride {
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("expected INDEX=VALUE"))]
+    #[snafu(display("expected INDEX=VALUE or NAME=VALUE"))]
     Shape,
-    #[snafu(display("index: {source}"))]
-    Slot { source: ParseIntError },
+    #[snafu(display("`{name}` is neither a slot index nor a parameter name: {source}"))]
+    Slot { name: String, source: ParseIntError },
     #[snafu(display("index must be below {PARAM_SLOTS}"))]
     Range,
     #[snafu(display("value: {source}"))]
@@ -33,7 +33,10 @@ impl FromStr for ParamOverride {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (slot, value) = s.split_once('=').context(ShapeSnafu)?;
-        let slot: usize = slot.parse().context(SlotSnafu)?;
+        let slot = match crate::settings::catalog::by_key(slot.trim()) {
+            Some(spec) => spec.slot,
+            None => slot.parse().context(SlotSnafu { name: slot })?,
+        };
         if slot >= PARAM_SLOTS {
             return RangeSnafu.fail();
         }
@@ -45,10 +48,15 @@ impl ParamOverride {
     /// Writes each override into its slot of an otherwise zeroed block; later ones win.
     pub fn pack(overrides: &[Self]) -> ParamBlock {
         let mut out = [[0.0; 4]; PARAM_SLOTS / 4];
-        for o in overrides {
-            out[o.slot / 4][o.slot % 4] = o.value;
-        }
+        Self::apply(overrides, &mut out);
         out
+    }
+
+    /// Writes each override into its slot of `block`, leaving the other slots as they were.
+    pub fn apply(overrides: &[Self], block: &mut ParamBlock) {
+        for o in overrides {
+            block[o.slot / 4][o.slot % 4] = o.value;
+        }
     }
 }
 
@@ -63,6 +71,7 @@ mod tests {
     #[case::plain("3=0.5", 3, 0.5)]
     #[case::negative_value("0=-2", 0, -2.0)]
     #[case::last_slot("31=1", 31, 1.0)]
+    #[case::by_name("ball_spin=0.2", 27, 0.2)]
     fn parses_index_and_value(#[case] input: &str, #[case] slot: usize, #[case] value: f32) {
         assert!(let Ok(parsed) = input.parse::<ParamOverride>());
         check!(parsed.slot == slot);

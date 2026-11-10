@@ -19,7 +19,8 @@ pub enum Error {
     Shaders { source: shaders::Error },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "lowercase")]
 enum PassKind {
     Field,
     Shade,
@@ -220,7 +221,7 @@ impl Bench<'_> {
             match self.renderer(&cut) {
                 Ok(mut renderer) => {
                     let without = self.measure(&mut renderer, view, size).pass(stage.pass).unwrap_or(base);
-                    let pass = if stage.pass == PassKind::Field { "field" } else { "shade" };
+                    let pass = stage.pass;
                     let saved = base - without;
                     println!("    {pass} {:<28} {saved:>7.2} ms {:>5.0}%", stage.name, 100.0 * saved / base);
                 },

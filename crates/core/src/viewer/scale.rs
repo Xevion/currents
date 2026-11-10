@@ -23,7 +23,7 @@ const COARSE_FIELD_STEP: u32 = 2;
 ///
 /// Slow frames first coarsen the flow field, which stays coarse from then on, and after that
 /// shrink a per-axis scale that recovers once frames have headroom again.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Budget {
     pub max_pixels: f64,
     /// Starting per-axis scale, at most 1.

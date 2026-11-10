@@ -5,6 +5,7 @@ mod camera;
 pub mod gpu;
 pub mod params;
 pub mod renderer;
+pub mod settings;
 #[cfg(test)]
 mod shader_check;
 pub mod shaders;

@@ -5,11 +5,12 @@ mod pass;
 mod resolve;
 mod timing;
 
-pub use debug::{FieldView, UnknownView};
+pub use debug::FieldView;
 use key::{Key, Keys};
 pub(crate) use pass::draw_fullscreen;
 use pass::{Inputs, Pass, SHARED_BINDINGS};
 use resolve::{History, Resolve};
+use strum::VariantArray;
 pub use timing::PassTimes;
 use timing::Timing;
 
@@ -269,12 +270,13 @@ impl Renderer {
             COLOR_FORMAT,
         );
         let debug_source = sources.assemble(include_str!("debug.wgsl"));
-        let debug = FieldView::ALL
-            .map(|view| {
+        let debug = FieldView::VARIANTS
+            .iter()
+            .map(|&view| {
                 let constants = [("mode", f64::from(view.mode()))];
                 pass::pipeline(
                     device,
-                    view.name(),
+                    view.into(),
                     debug_source.clone(),
                     "fs_main",
                     &shade.layout,
@@ -282,7 +284,7 @@ impl Renderer {
                     COLOR_FORMAT,
                 )
             })
-            .to_vec();
+            .collect();
         let sampler = if filterable {
             linear_sampler(device)
         } else {
@@ -597,8 +599,8 @@ mod tests {
     fn debug_views_validate_and_translate_for_webgl() {
         let source = Sources::embedded().assemble(include_str!("debug.wgsl"));
         validate("debug", &source);
-        for view in FieldView::ALL {
-            to_webgl(view.name(), &source, &[("mode", f64::from(view.mode()))]);
+        for &view in FieldView::VARIANTS {
+            to_webgl(view.into(), &source, &[("mode", f64::from(view.mode()))]);
         }
     }
 }

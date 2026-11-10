@@ -1,25 +1,18 @@
+use crate::settings::CameraTuning;
 use crate::view::View;
 
 const MIN_HALF_HEIGHT: f32 = 0.002;
-/// Zoom factor applied per scroll line.
-const ZOOM_PER_LINE: f32 = 1.15;
 /// Pixel scroll distance that counts as one line.
 pub(crate) const PIXELS_PER_LINE: f32 = 40.0;
-/// Seconds in which the shown view closes about two thirds of the way to where input put it.
-const EASE_SECS: f32 = 0.08;
 /// Share of the view's height within which the shown view counts as arrived, well under a pixel.
 const ARRIVED: f32 = 2e-5;
-/// Seconds in which a view let go past the edge of its region closes most of the way back.
-const RETURN_SECS: f32 = 0.18;
-/// Furthest a view can be pushed past its region, as a share of its own size. The push meets
-/// more resistance the further it goes and never gets beyond this.
-const GIVE: f32 = 0.15;
 /// How far past the region input may ask for, in regions; only keeps the numbers finite.
 const REACH: f32 = 4.0;
 
-/// How far a push of `over` past an edge shows: one for one at first, levelling off at `GIVE`.
-fn give(over: f32) -> f32 {
-    GIVE * over / (over + GIVE)
+/// How far a push of `over` past an edge shows: one for one at first, levelling off at `limit`.
+/// The push meets more resistance the further it goes and never gets beyond the limit.
+fn give(over: f32, limit: f32) -> f32 {
+    if limit <= 0.0 { 0.0 } else { limit * over / (over + limit) }
 }
 
 /// Window size in pixels, as floats.
@@ -73,11 +66,11 @@ impl Framing {
 
     /// This framing as it shows while pushed past the region: what lies inside is unchanged,
     /// and what lies past an edge gives a little and then holds.
-    fn yielding(mut self, viewport: Viewport) -> Self {
+    fn yielding(mut self, viewport: Viewport, limit: f32) -> Self {
         let region = viewport.region();
         let over = self.half_height / region[1] - 1.0;
         if over > 0.0 {
-            self.half_height = region[1] * (1.0 + give(over));
+            self.half_height = region[1] * (1.0 + give(over, limit));
         }
         self.half_height = self.half_height.max(MIN_HALF_HEIGHT);
         let half = self.half(viewport);
@@ -87,7 +80,7 @@ impl Framing {
             let size = 2.0 * half[axis];
             let past = (offset.abs() - slack) / size;
             if past > 0.0 {
-                self.centre[axis] = 0.5 + offset.signum() * size.mul_add(give(past), slack);
+                self.centre[axis] = 0.5 + offset.signum() * size.mul_add(give(past, limit), slack);
             }
         }
         self
@@ -123,18 +116,30 @@ pub(crate) struct Camera {
     shown: Framing,
     /// Whether a drag is in progress, which keeps the target where it was put.
     held: bool,
+    pub(crate) tuning: CameraTuning,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Self { target: Framing::WHOLE, shown: Framing::WHOLE, held: false }
+        Self { target: Framing::WHOLE, shown: Framing::WHOLE, held: false, tuning: CameraTuning::default() }
     }
 }
 
 impl Camera {
+    pub(crate) fn new(tuning: CameraTuning) -> Self {
+        Self { tuning, ..Self::default() }
+    }
+
     /// The view to draw.
     pub(crate) fn view(&self, viewport: Viewport) -> View {
         View::from_centre(self.shown.centre, self.shown.half(viewport))
+    }
+
+    /// The cover point drawn under `cursor`, in window pixels.
+    pub(crate) fn cover_point(&self, cursor: [f64; 2], viewport: Viewport) -> [f32; 2] {
+        let [x0, y0, x1, y1] = self.view(viewport).to_array();
+        let (u, v) = (cursor[0] as f32 / viewport.width, cursor[1] as f32 / viewport.height);
+        [(x1 - x0).mul_add(u, x0), (y1 - y0).mul_add(v, y0)]
     }
 
     pub(crate) fn reset(&mut self) {
@@ -151,11 +156,11 @@ impl Camera {
     pub(crate) fn advance(&mut self, dt: f32, viewport: Viewport) {
         if !self.held {
             let inside = self.target.bounded(viewport);
-            let next = self.target.toward(&inside, 1.0 - (-dt / RETURN_SECS).exp());
+            let next = self.target.toward(&inside, 1.0 - (-dt / self.tuning.return_secs).exp());
             self.target = if next.arrived_at(&inside) { inside } else { next };
         }
-        let goal = self.target.yielding(viewport);
-        let next = self.shown.toward(&goal, 1.0 - (-dt / EASE_SECS).exp());
+        let goal = self.target.yielding(viewport, self.tuning.give);
+        let next = self.shown.toward(&goal, 1.0 - (-dt / self.tuning.ease_secs).exp());
         self.shown = if next.arrived_at(&goal) { goal } else { next };
     }
 
@@ -173,7 +178,7 @@ impl Camera {
 
     /// Zooms in by `lines` scroll lines (out when negative), keeping the point under `cursor` fixed.
     pub(crate) fn zoom(&mut self, lines: f32, cursor: [f64; 2], viewport: Viewport) {
-        self.scale_extent(ZOOM_PER_LINE.powf(-lines), cursor, viewport);
+        self.scale_extent(self.tuning.zoom_per_line.powf(-lines), cursor, viewport);
     }
 
     /// Multiplies the visible extent by `factor`, keeping the point under `cursor` fixed.
@@ -212,7 +217,7 @@ mod tests {
 
     fn at(centre: [f32; 2], half_height: f32) -> Camera {
         let framing = Framing { centre, half_height };
-        Camera { target: framing, shown: framing, held: false }
+        Camera { target: framing, shown: framing, ..Camera::default() }
     }
 
     #[rstest]
@@ -285,8 +290,8 @@ mod tests {
         camera.pan(toward.map(|v| v * 1e6), viewport);
         for _ in 0..200 {
             camera.advance(1.0 / 60.0, viewport);
-            // a zoom past the limit and a pan past the edge each give at most GIVE
-            check!(within(camera.view(viewport).to_array(), viewport, 2.0 * GIVE));
+            // a zoom past the limit and a pan past the edge each give at most the tuned limit
+            check!(within(camera.view(viewport).to_array(), viewport, 2.0 * camera.tuning.give));
         }
         check!(!within(camera.view(viewport).to_array(), viewport, 0.0));
         camera.hold(false);

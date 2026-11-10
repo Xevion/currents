@@ -1,16 +1,20 @@
-use std::fmt;
 use std::path::Path;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, RgbImage};
 use snafu::{ResultExt, Snafu};
+use strum::{Display, EnumString};
 
 /// An image file format the renderer can write.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Display, EnumString)]
+#[strum(ascii_case_insensitive)]
 pub enum Format {
+    #[strum(to_string = "PNG", serialize = "png")]
     Png,
+    #[strum(to_string = "JPEG", serialize = "jpg", serialize = "jpeg")]
     Jpeg,
+    #[strum(to_string = "WebP", serialize = "webp")]
     Webp,
 }
 
@@ -25,23 +29,7 @@ impl Format {
 
     /// The format `path`'s extension names, if it is one of these.
     pub fn from_path(path: &Path) -> Option<Self> {
-        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-        match extension.as_str() {
-            "png" => Some(Self::Png),
-            "jpg" | "jpeg" => Some(Self::Jpeg),
-            "webp" => Some(Self::Webp),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for Format {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Png => "PNG",
-            Self::Jpeg => "JPEG",
-            Self::Webp => "WebP",
-        })
+        path.extension()?.to_str()?.parse().ok()
     }
 }
 

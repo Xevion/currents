@@ -6,8 +6,8 @@ use std::str::FromStr;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 pub(crate) use currents_core::View;
 use currents_core::renderer::FieldView;
+use currents_core::settings::Settings;
 use currents_core::shaders::{self, Sources};
-use currents_core::viewer::Settings;
 use currents_core::{ParamBlock, ParamOverride};
 pub(crate) use size::OutputSize;
 
@@ -15,7 +15,9 @@ use crate::export::encode::Format;
 
 /// Live rendering of the Currents cover. With no subcommand, opens the interactive viewer
 /// (scroll to zoom at the cursor, drag to pan, space to pause, R to reset, D to cycle the
-/// field debug views, T to switch temporal antialiasing, Esc to quit).
+/// field debug views, T to switch temporal antialiasing, Esc for the settings menu, Ctrl+Q to
+/// quit; holding the right button on the ball also opens the menu). Settings changed in the
+/// menu are kept in the settings file; flags given here apply to this run only.
 #[derive(Parser)]
 pub(crate) struct Cli {
     #[command(flatten)]
@@ -50,7 +52,7 @@ pub(crate) struct Common {
     /// Output pixels per flow field texel; above 1 trades the stream's thinnest filaments for speed
     #[arg(long, default_value_t = 1, global = true)]
     pub(crate) field_step: u32,
-    /// Tuning parameter override, INDEX=VALUE (repeatable)
+    /// Tuning parameter override, INDEX=VALUE or NAME=VALUE (repeatable)
     #[arg(short = 'p', long = "param", global = true)]
     pub(crate) params: Vec<ParamOverride>,
     /// Draw a view of the flow field instead of the picture: line, label, velocity or density
@@ -78,18 +80,21 @@ impl Common {
         Sources::from_dir(&self.shaders)
     }
 
-    /// The viewer setup: every window pixel rendered, with the shaders read from disk.
-    pub(crate) fn settings(&self) -> Result<Settings, shaders::Error> {
-        Ok(Settings {
-            sources: self.sources()?,
-            speed: self.speed,
-            supersampling: self.supersampling(),
-            temporal: self.temporal(),
-            field_step: self.field_step,
-            params: self.param_array(),
-            budget: None,
-            debug: self.debug,
-        })
+    /// Lays the flags `given` on the command line over `settings`; the rest keep their saved values.
+    pub(crate) fn overlay(&self, settings: &mut Settings, given: impl Fn(&str) -> bool) {
+        if given("speed") {
+            settings.motion.speed = self.speed;
+        }
+        if given("ss") {
+            settings.render.supersampling = self.supersampling();
+        }
+        if given("aa") {
+            settings.render.temporal = self.temporal();
+        }
+        if given("field_step") {
+            settings.render.field_step = self.field_step.max(1);
+        }
+        ParamOverride::apply(&self.params, &mut settings.params.0);
     }
 }
 
