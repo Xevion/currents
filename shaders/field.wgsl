@@ -186,11 +186,23 @@ fn catmull_rom(f: f32) -> vec4f {
     return vec4f(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0, -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
 }
 
-// The liquid at p now, by way of the key.
-fn carried(p: vec2f, scn: Scene) -> vec2f {
+// The liquid at p now, followed back to the key's time: where it was then, or, when the way
+// there took it into the steady flow, what it is.
+struct Hop {
+    at: vec2f,
+    liquid: vec2f,
+    steady: bool,
+}
+
+fn hop_back(p: vec2f, scn: Scene) -> Hop {
+    var o: Hop;
     var y = p;
     var d = inflow_distance(y, scn);
-    if (d <= 0.0) { return steady_liquid(y, u.time, scn); }
+    o.steady = true;
+    if (d <= 0.0) {
+        o.liquid = steady_liquid(y, u.time, scn);
+        return o;
+    }
     let span = u.time - u.key_time;
     let n = max(i32(ceil(span / MAX_TRACE_DT)), 1);
     let h = span / f32(n);
@@ -198,10 +210,20 @@ fn carried(p: vec2f, scn: Scene) -> vec2f {
         let tt = u.time - f32(i) * h;
         let yn = step_back(y, tt, h, scn);
         let dn = inflow_distance(yn, scn);
-        if (dn <= 0.0) { return liquid_at_inflow(y, d, dn, tt, h, scn); }
+        if (dn <= 0.0) {
+            o.liquid = liquid_at_inflow(y, d, dn, tt, h, scn);
+            return o;
+        }
         y = yn;
         d = dn;
     }
+    o.steady = false;
+    o.at = y;
+    return o;
+}
+
+// The liquid that was at y at the key's time.
+fn key_liquid(y: vec2f, scn: Scene) -> vec2f {
     let cover = plane_to_cover(scn.cam, y + scn.centre);
     let g = (cover - u.key_view.xy) / (u.key_view.zw - u.key_view.xy) * u.key_size - 0.5;
     let cell = floor(g);
@@ -219,12 +241,51 @@ fn carried(p: vec2f, scn: Scene) -> vec2f {
     return acc;
 }
 
+// The liquid at p now, by way of the key.
+fn carried(p: vec2f, scn: Scene) -> vec2f {
+    let hop = hop_back(p, scn);
+    if (hop.steady) { return hop.liquid; }
+    return key_liquid(hop.at, scn);
+}
+
+// On-screen velocity of the liquid at rel, in reference pixels per unit time.
+fn screen_velocity(rel: vec2f, scn: Scene) -> vec2f {
+    let v = flow_velocity(rel, u.time, scn);
+    let p0 = plane_to_cover(scn.cam, rel + scn.centre);
+    return (plane_to_cover(scn.cam, rel + scn.centre + v * 0.01) - p0) * (REFPX / 0.01);
+}
+
+// The way back to the key's time bends little over a few pixels, so while a key is held it is
+// worked out once every `hop_step` field texels each way, as the shift from here to there, and
+// the field pass blends between those. The key itself is still read at every texel.
+override hop_step: f32 = 4.0;
+@group(0) @binding(4) var hops: texture_2d<f32>;
+
+// Marks a hop that ended in the steady flow, or has no plane under it: it has no shift to blend.
+const NO_HOP = 1e30;
+
+@fragment
+fn fs_hop(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let scn = scene();
+    // texel centres sit a texel outside the picture at its top and left, so every field
+    // texel has one on each side
+    let cover = pos_to_cover((pos.xy - 1.5) * hop_step * u.field_scale);
+    if (dot(scn.cam.n, ray(cover)) <= 1e-4) { return vec4f(NO_HOP); }
+    let rel = cover_to_plane(scn.cam, cover) - scn.centre;
+    let hop = hop_back(rel, scn);
+    let shift = select(hop.at - rel, vec2f(NO_HOP), hop.steady);
+    return vec4f(shift, screen_velocity(rel, scn));
+}
+
+// A key, drawn with the key's own span of the cover as the view and its time as the frame's.
+// Given the key before it, it is that key carried forward: the liquid's history is traced once,
+// when it first comes into a key, and handed on from each key to the next.
 @fragment
 fn fs_key(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let scn = scene();
-    let cover = u.key_view.xy + pos.xy / u.key_size * (u.key_view.zw - u.key_view.xy);
-    let rel = cover_to_plane(scn.cam, cover) - scn.centre;
-    return vec4f(traced(rel, u.key_time, scn), 0.0, 0.0);
+    let rel = cover_to_plane(scn.cam, pos_to_cover(pos.xy)) - scn.centre;
+    if (u.key_size.x > 0.0) { return vec4f(carried(rel, scn), 0.0, 0.0); }
+    return vec4f(traced(rel, u.time, scn), 0.0, 0.0);
 }
 
 @fragment
@@ -233,10 +294,31 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let scn = scene();
     let rel = cover_to_plane(scn.cam, cover) - scn.centre;
     var liquid: vec2f;
+    var vs: vec2f;
     if (u.key_size.x > 0.0) {
-        liquid = carried(rel, scn);
+        let g = pos.xy / hop_step + 1.0;
+        let cell = vec2i(floor(g));
+        let f = fract(g);
+        let h00 = textureLoad(hops, cell, 0);
+        let h10 = textureLoad(hops, cell + vec2i(1, 0), 0);
+        let h01 = textureLoad(hops, cell + vec2i(0, 1), 0);
+        let h11 = textureLoad(hops, cell + vec2i(1, 1), 0);
+        let acc = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+        let whole = max(max(h00.x, h10.x), max(h01.x, h11.x)) < 0.5 * NO_HOP;
+        // by a hop that ended in the steady flow, each texel follows its own liquid back
+        if (whole) {
+            liquid = key_liquid(rel + acc.xy, scn);
+        } else {
+            liquid = carried(rel, scn);
+        }
+        if (all(abs(acc.zw) < vec2f(1e9))) {
+            vs = acc.zw;
+        } else {
+            vs = screen_velocity(rel, scn);
+        }
     } else {
         liquid = traced(rel, u.time, scn);
+        vs = screen_velocity(rel, scn);
     }
     let a = scn.radius;
     let rr = length(rel);
@@ -244,9 +326,5 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let pool = (0.7 + P(P_POOL_FLARE)) * smoothstep(a * 1.8, a * 1.0, rr) * smoothstep(0.9, -0.3, dot(rel, scn.down) / a);
     let hw = 0.8 + P(P_STREAM_HALF_WIDTH) + pool;
     let c = abs(liquid.x) - hw;
-    // on-screen velocity of the liquid here, in reference pixels per unit time
-    let v = flow_velocity(rel, u.time, scn);
-    let p0 = plane_to_cover(scn.cam, rel + scn.centre);
-    let vs = (plane_to_cover(scn.cam, rel + scn.centre + v * 0.01) - p0) * (REFPX / 0.01);
     return vec4f(c, liquid.y, vs);
 }

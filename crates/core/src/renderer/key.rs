@@ -1,5 +1,6 @@
 //! Keys: the traced liquid over the view at a fixed time, which the frames after it read
-//! instead of tracing every pixel's whole history again.
+//! instead of tracing every pixel's whole history again. A key is traced when none came
+//! before it, and otherwise carried forward from the key it replaces.
 
 use std::ops::Range;
 
@@ -170,6 +171,8 @@ impl Key {
 pub(super) struct Slice {
     pub(super) slot: usize,
     pub(super) key: Key,
+    /// The key in the other texture to carry forward into this one; `None` traces it afresh.
+    pub(super) from: Option<Key>,
     pub(super) stripes: Range<u32>,
 }
 
@@ -219,7 +222,7 @@ impl Keys {
                 _ => {
                     self.coming = None;
                     self.held = Key::plan(time, view, field);
-                    return self.held.map(|key| Slice { slot: self.slot, key, stripes: 0..STRIPES });
+                    return self.held.map(|key| Slice { slot: self.slot, key, from: None, stripes: 0..STRIPES });
                 },
             }
         }
@@ -236,7 +239,7 @@ impl Keys {
         let stripes = ((STRIPES as f32 * dt / (PREPARE * held.span)).ceil() as u32).clamp(1, left);
         let range = *done..*done + stripes;
         *done += stripes;
-        Some(Slice { slot: self.slot ^ 1, key: *key, stripes: range })
+        Some(Slice { slot: self.slot ^ 1, key: *key, from: Some(held), stripes: range })
     }
 }
 
@@ -311,7 +314,7 @@ mod tests {
         let dt = 0.4 / 60.0;
         let mut keys = Keys::default();
         assert!(let Some(first) = keys.advance(7.0, dt, FULL, FIELD));
-        check!(first.stripes == (0..STRIPES) && first.is_heavy());
+        check!(first.stripes == (0..STRIPES) && first.is_heavy() && first.from == None);
         assert!(let Some((slot, held)) = keys.held());
         check!((first.slot, first.key) == (slot, held));
 
@@ -321,6 +324,7 @@ mod tests {
             let slice = keys.advance(dt.mul_add(frame as f32, 7.0), dt, FULL, FIELD);
             if let Some(slice) = slice.filter(|_| keys.held().is_some_and(|(_, key)| key == held)) {
                 check!(slice.slot != slot && slice.stripes.start == done && !slice.is_heavy());
+                check!(slice.from == Some(held));
                 done = slice.stripes.end;
             }
             frame += 1;

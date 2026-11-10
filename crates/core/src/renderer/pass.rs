@@ -25,17 +25,19 @@ impl Inputs {
 
 impl Pass {
     /// Builds the pipeline for fragment entry point `entry` of `source`, with a uniform buffer,
-    /// the noise tile and `inputs` textures (plus their sampler) bound in group 0.
+    /// the noise tile and `inputs` textures (plus their sampler) bound in group 0; `constants`
+    /// fill its overrides.
     pub(super) fn new(
         device: &wgpu::Device,
         name: &str,
         source: String,
         entry: &str,
         inputs: Inputs,
+        constants: &[(&str, f64)],
         format: wgpu::TextureFormat,
     ) -> Self {
         let layout = bind_layout(device, name, inputs);
-        let pipeline = pipeline(device, name, source, entry, &layout, &[], format);
+        let pipeline = pipeline(device, name, source, entry, &layout, constants, format);
         Self { pipeline, layout }
     }
 }
