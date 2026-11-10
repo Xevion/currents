@@ -9,7 +9,8 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::Common;
-use crate::renderer::{Renderer, Uniforms};
+use crate::gpu::{self, Gpu};
+use crate::renderer::{PassTimes, Renderer, Uniforms, draw_fullscreen};
 
 const BLIT: &str = r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -112,24 +113,7 @@ impl App {
             ],
         });
         let view = frame.texture.create_view(&Default::default());
-        {
-            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            rp.set_pipeline(&g.blit);
-            rp.set_bind_group(0, &bind, &[]);
-            rp.draw(0..3, 0..1);
-        }
+        draw_fullscreen(&mut enc, &view, &g.blit, &bind, None);
         g.queue.submit([enc.finish()]);
         g.renderer.after_submit();
         g.queue.present(frame);
@@ -139,7 +123,7 @@ impl App {
         let dt = (now - self.fps_at).as_secs_f32();
         if dt > 0.5 {
             let state = if self.paused { "paused" } else { "running" };
-            let [f, s] = pass.unwrap_or_default();
+            let PassTimes { field: f, shade: s } = pass.unwrap_or_default();
             g.window.set_title(&format!(
                 "currents | {:.0} fps | field {f:.1}ms shade {s:.1}ms | t={:.1} | {state}",
                 self.frames as f32 / dt,
@@ -159,14 +143,7 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes().with_title("currents").with_inner_size(LogicalSize::new(900, 900));
         let window = Arc::new(el.create_window(attrs).expect("window"));
         let surface = self.instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(self.instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .expect("adapter");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&crate::renderer::device_desc(&adapter))).expect("device");
+        let Gpu { adapter, device, queue } = gpu::request(&self.instance, Some(&surface));
         let size = window.inner_size();
         let mut config =
             surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");

@@ -1,10 +1,12 @@
+mod gpu;
 mod renderer;
 mod viewer;
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use renderer::{Renderer, Uniforms};
+use gpu::Gpu;
+use renderer::{PassTimes, Renderer, Uniforms};
 
 const COVER: &str = "references/stills/cover-apple-3000.jpg";
 
@@ -150,14 +152,9 @@ fn render(common: &Common, args: &RenderArgs) {
     let (w, h) = (ow * ss, oh * ss);
 
     let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .expect("adapter");
-    let (device, queue) = pollster::block_on(adapter.request_device(&renderer::device_desc(&adapter))).expect("device");
+    let Gpu { device, queue, .. } = gpu::request(&instance, None);
     let mut renderer = Renderer::new(&device, &queue, &common.shaders);
-    let mut pass_sum = [0.0f32; 2];
+    let mut pass_sum = PassTimes::default();
 
     let row = (w * 4).next_multiple_of(256);
     let rbuf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -196,7 +193,8 @@ fn render(common: &Common, args: &RenderArgs) {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let gpu_ms = t0.elapsed().as_secs_f32() * 1000.0;
         let pass = renderer.pass_ms(&device, true).unwrap_or_default();
-        pass_sum = [pass_sum[0] + pass[0], pass_sum[1] + pass[1]];
+        pass_sum.field += pass.field;
+        pass_sum.shade += pass.shade;
 
         let image = {
             let data = slice.get_mapped_range().unwrap();
@@ -234,8 +232,8 @@ fn render(common: &Common, args: &RenderArgs) {
                 oh,
                 ss,
                 gpu_ms,
-                pass_sum[0] / n,
-                pass_sum[1] / n,
+                pass_sum.field / n,
+                pass_sum.shade / n,
                 args.frames
             );
         }
