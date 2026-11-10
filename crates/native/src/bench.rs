@@ -45,9 +45,9 @@ const STAGES: &[Stage] = &[
         edits: &[
             (
                 "let n1 = flow_noise(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));",
-                "let n1 = vec3f(0.0);",
+                "let n1 = vec3f(0.0 * t);",
             ),
-            ("let n2 = flow_noise(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));", "let n2 = vec3f(0.0);"),
+            ("let n2 = flow_noise(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));", "let n2 = vec3f(0.0 * t);"),
         ],
     },
     Stage {
@@ -60,6 +60,16 @@ const STAGES: &[Stage] = &[
     },
     Stage {
         pass: PassKind::Field,
+        name: "steps back to the key",
+        edits: &[("let yn = step_back(y, tt, h, scn);", "let yn = y;")],
+    },
+    Stage {
+        pass: PassKind::Field,
+        name: "key read",
+        edits: &[("liquid = key_liquid(rel + acc.xy, scn);", "liquid = rel + acc.xy;")],
+    },
+    Stage {
+        pass: PassKind::Field,
         name: "screen velocity",
         edits: &[("let v = flow_velocity(rel, u.time, scn);", "let v = vec2f(0.0);")],
     },
@@ -67,8 +77,8 @@ const STAGES: &[Stage] = &[
         pass: PassKind::Shade,
         name: "flow grain",
         edits: &[
-            ("let gfine = flow_grain(gp, vflow, 1.2, fpx, 1.0);", "let gfine = 0.0;"),
-            ("let gclump = flow_grain(gp, vflow, 5.5, fpx, 9.0);", "let gclump = 0.0;"),
+            ("let fine = flow_grain(gp, vflow, 1.2, fpx, 1.0);", "let fine = vec3f(0.0);"),
+            ("let clump = flow_grain(gp, vflow, 5.5, fpx, 9.0);", "let clump = vec3f(0.0);"),
         ],
     },
     Stage {

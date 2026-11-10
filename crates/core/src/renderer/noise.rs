@@ -12,8 +12,8 @@ pub(super) fn source(sources: &Sources) -> String {
     sources.assemble(include_str!("noise.wgsl"))
 }
 
-/// Renders the gradient noise the passes sample into a texture, once. Each level is the noise
-/// itself sampled more sparsely, not an average of the level above.
+/// Renders the gradient noise the passes sample into a texture, once. The finest level is the
+/// noise itself; each one after averages it over its texels, as a pixel that wide would see it.
 pub(super) fn bake(device: &wgpu::Device, queue: &wgpu::Queue, sources: &Sources) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("noise"),
@@ -35,7 +35,7 @@ pub(super) fn bake(device: &wgpu::Device, queue: &wgpu::Queue, sources: &Sources
             mip_level_count: Some(1),
             ..Default::default()
         });
-        let constants = [("texels", f64::from(TEXELS >> level))];
+        let constants = [("texels", f64::from(TEXELS >> level)), ("taps", f64::from(1u32 << level))];
         let pipeline = pipeline(device, "noise", source(sources), "fs_main", &layout, &constants, FORMAT);
         draw_fullscreen(&mut enc, &target, &pipeline, &bind, None);
     }

@@ -46,26 +46,31 @@ const GRAIN_PERIOD = 0.4;                      // grain refresh period for the m
 // magnifies it; fpx (ref px per shaded px) fades out each octave before it nears two
 // displayed pixels per cycle, where it would shimmer as it drifts. An octave that has faded
 // out is not evaluated, which is most of the grain's cost once the picture is minified.
-fn grain(p: vec2f, cell: f32, fpx: f32) -> f32 {
+// Returns the grain in x and its slope per reference pixel in yz.
+fn grain_slope(p: vec2f, cell: f32, fpx: f32) -> vec3f {
     let q = p / cell;
     let k = fpx * u.supersampling / cell;
     let fa = 1.0 - smoothstep(0.4, 0.625, k);
     let fb = 1.0 - smoothstep(0.4, 0.625, 2.13 * k);
-    var n = 0.0;
+    var n = vec3f(0.0);
     let stride = fpx / cell;
-    if (fa > 0.0) { n = gradient_noise_spaced(q, stride).x * fa; }
-    if (fb > 0.0) { n += gradient_noise_spaced(q * 2.13 + 7.3, 2.13 * stride).x * 0.55 * fb; }
+    if (fa > 0.0) { n = gradient_noise_spaced(q, stride) * vec3f(1.0, vec2f(1.0 / cell)) * fa; }
+    if (fb > 0.0) { n += gradient_noise_spaced(q * 2.13 + 7.3, 2.13 * stride) * vec3f(1.0, vec2f(2.13 / cell)) * (0.55 * fb); }
     return n * 4.4;
 }
 
+fn grain(p: vec2f, cell: f32, fpx: f32) -> f32 {
+    return grain_slope(p, cell, fpx).x;
+}
+
 // Grain carried by the liquid at screen velocity v: two copies drift with it and take turns,
-// each restarting while hidden, so it never stretches far.
-fn flow_grain(gp: vec2f, v: vec2f, cell: f32, fpx: f32, seed: f32) -> f32 {
+// each restarting while hidden, so it never stretches far. Value and slope, as grain_slope.
+fn flow_grain(gp: vec2f, v: vec2f, cell: f32, fpx: f32, seed: f32) -> vec3f {
     let ph = u.time / GRAIN_PERIOD;
     let f1 = fract(ph);
     let f2 = fract(ph + 0.5);
-    let n1 = grain(gp - v * (f1 * GRAIN_PERIOD) + hash22(vec2f(floor(ph), seed)) * 211.0, cell, fpx);
-    let n2 = grain(gp - v * (f2 * GRAIN_PERIOD) + hash22(vec2f(floor(ph + 0.5), seed + 3.0)) * 211.0, cell, fpx);
+    let n1 = grain_slope(gp - v * (f1 * GRAIN_PERIOD) + hash22(vec2f(floor(ph), seed)) * 211.0, cell, fpx);
+    let n2 = grain_slope(gp - v * (f2 * GRAIN_PERIOD) + hash22(vec2f(floor(ph + 0.5), seed + 3.0)) * 211.0, cell, fpx);
     let w = 1.0 - abs(2.0 * f1 - 1.0);
     return (w * n1 + (1.0 - w) * n2) * inverseSqrt(w * w + (1.0 - w) * (1.0 - w));
 }
@@ -80,21 +85,34 @@ fn lilac(t: f32) -> vec3f {
     return mix(k[i], k[i + 1], x - f32(i)) / 255.0;
 }
 
-// Cross-section of a band lit from one edge: tone and speckle density at distance dl from the
-// lit edge and ds from the shadowed one (ref px), for a band w wide. Thin bands are a pale stripe
-// over a speckled body; fat ones are airbrushed tubes whose shadow side dissolves into speckle.
-fn band_profile(dl: f32, ds: f32, w: f32) -> vec2f {
+// Mean over x from x0 to x1 of a ramp that rises from 0 at a to 1 at b.
+fn ramp_mean(a: f32, b: f32, x0: f32, x1: f32) -> f32 {
+    let u0 = clamp((x0 - a) / (b - a), 0.0, 1.0);
+    let u1 = clamp((x1 - a) / (b - a), 0.0, 1.0);
+    let area = 0.5 * (b - a) * (u1 * u1 - u0 * u0) + max(x1 - max(x0, b), 0.0);
+    return area / max(x1 - x0, 1e-4);
+}
+
+// Cross-section of a band lit from one edge: tone and speckle density over the stretch of the
+// band a pixel covers, from d0 to d1 from the lit edge and about ds from the shadowed one (ref
+// px), for a band w wide. Thin bands are a pale stripe over a speckled body; fat ones are
+// airbrushed tubes whose shadow side dissolves into speckle. The pale stripe is thinner than a
+// pixel in a wide view, so it counts for the share of the stretch it fills.
+fn band_profile(d0: f32, d1: f32, ds: f32, w: f32) -> vec2f {
+    let dl = 0.5 * (d0 + d1);
     let fat = smoothstep(7.0, 18.0, w);
     let pw = 0.36 * w + 0.12 * max(w - 8.0, 0.0);
-    var t = mix(0.92 + P(P_BAND_EDGE_TONE), 0.44 + P(P_BAND_BODY_TONE), smoothstep(pw - 0.5, pw + 0.6 + 0.1 * w, dl));
-    var dens = 0.48 * smoothstep(pw - 0.5, pw + 1.5 + 0.2 * w, dl);
-    let uu = dl / max(dl + ds, 1e-3);
-    let tt = mix(0.9, 0.4, smoothstep(0.3, 0.88, uu)) - 0.12 * smoothstep(0.85, 1.0, uu);
-    let td = 0.5 * smoothstep(0.5, 0.85, uu) + 0.3 * smoothstep(0.85, 1.0, uu);
+    var t = mix(0.92 + P(P_BAND_EDGE_TONE), 0.44 + P(P_BAND_BODY_TONE), ramp_mean(pw - 0.5, pw + 0.6 + 0.1 * w, d0, d1));
+    var dens = 0.48 * ramp_mean(pw - 0.5, pw + 1.5 + 0.2 * w, d0, d1);
+    let across = max(dl + ds, 1e-3);
+    let uu = dl / across;
+    let hu = 0.5 * (d1 - d0) / across;
+    let tt = mix(0.9, 0.4, smoothstep(0.3 - hu, 0.88 + hu, uu)) - 0.12 * smoothstep(0.85 - hu, 1.0 + hu, uu);
+    let td = 0.5 * smoothstep(0.5 - hu, 0.85 + hu, uu) + 0.3 * smoothstep(0.85 - hu, 1.0 + hu, uu);
     let ft = fat * (1.0 - P(P_FAT_BAND_FLATTEN));
     t = mix(t, tt, ft);
     dens = mix(dens, td, ft);
-    t = mix(1.0, t, smoothstep(0.25, 0.9 + 0.03 * w, dl));
+    t = mix(1.0, t, ramp_mean(0.25, 0.9 + 0.03 * w, d0, d1));
     return vec2f(t, dens);
 }
 
@@ -105,7 +123,12 @@ struct Band {
     density: f32,
 }
 
-fn band_at(c: f32, glen: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
+// Length of the stretch from a to b that lies within h of f.
+fn overlap(f: f32, h: f32, a: f32, b: f32) -> f32 {
+    return max(min(f + h, b) - max(f - h, a), 0.0);
+}
+
+fn band_at(c: f32, glen: f32, gh: vec2f, m: f32, edge: f32, rough: f32) -> Band {
     var o: Band;
     let k = floor(c);
     let f = c - k;
@@ -115,12 +138,19 @@ fn band_at(c: f32, glen: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
     // distances (ref px) to the band's low and high edges; negative outside the band
     let a_lo = (f - lo) / glen;
     let a_hi = select((1.0 - f) / glen, -f / glen, f < lo);
-    let dd = select(min(a_lo, a_hi), -min(lo - f, f) / glen, f < lo);
-    o.coverage = clamp((dd + rough) * px + 0.5, 0.0, 1.0);
+    // share of the pixel's width across the lines that this band and its two neighbours
+    // cover, so a band thinner than the pixel weighs what it covers and no more
+    let h = 0.5 * glen / edge;
+    let r = rough * glen;
+    o.coverage = clamp((overlap(f, h, lo - r, 1.0 + r) + overlap(f, h, lo - 1.0 - r, r) + overlap(f, h, lo + 1.0 - r, 2.0 + r)) / (2.0 * h), 0.0, 1.0);
     // the high edge faces +grad c; light it when that faces the light
     let e = clamp(dot(gh, LIGHT) / 0.35, -1.0, 1.0);
-    let lit_hi = band_profile(max(a_hi, 0.0), max(a_lo, 0.0), w);
-    let lit_lo = band_profile(max(a_lo, 0.0), max(a_hi, 0.0), w);
+    // the stretch of the band under the pixel, as distances from each edge
+    let reach = 0.5 / edge;
+    let hi = clamp(vec2f(a_hi - reach, a_hi + reach), vec2f(0.0), vec2f(w));
+    let low = clamp(vec2f(a_lo - reach, a_lo + reach), vec2f(0.0), vec2f(w));
+    let lit_hi = band_profile(hi.x, hi.y, max(a_lo, 0.0), w);
+    let lit_lo = band_profile(low.x, low.y, max(a_hi, 0.0), w);
     let pr = mix(lit_lo, lit_hi, 0.5 + 0.5 * e);
     o.tone = pr.x;
     o.density = pr.y;
@@ -134,6 +164,7 @@ struct Pixel {
     out_px_per_cover: f32,
     out_px_per_ref: f32,
     ref_px_per_out: f32,
+    edge: f32,             // edge ramps per reference pixel
     field_step: f32,       // field texel step, in output pixels
     line: f32,             // stripe line coordinate in periods, negative inside the stream
     flow_label: f32,       // label that rides with the fluid along each band
@@ -146,6 +177,7 @@ struct Pixel {
     grain_fine: f32,
     grain_clump: f32,
     speckle: f32,
+    speckle_slope: f32,    // how fast the speckle changes, per reference pixel
     edge_rough: f32,
     black: vec3f,
 }
@@ -156,6 +188,9 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     let opx = u.resolution.x / vsize.x;   // output pixels per cover unit
     let px = opx / REFPX;                 // output pixels per reference pixel
     let fpx = 1.0 / px;
+    // an edge ramps over one pixel where supersampling softens it further, and a little
+    // more where the pixel shaded is the pixel shown
+    let edge = px / max(1.0, 1.4 / u.supersampling);
     let fo = u.field_scale;
     let fv = sample_field(pos.xy);
     let fxp = sample_field(pos.xy + vec2f(fo, 0.0));
@@ -174,8 +209,10 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
 
     let gp = cover * REFPX;
     // grain riding with the liquid: fine speckle plus a coarser clumping
-    let gfine = flow_grain(gp, vflow, 1.2, fpx, 1.0);
-    let gclump = flow_grain(gp, vflow, 5.5, fpx, 9.0);
+    let fine = flow_grain(gp, vflow, 1.2, fpx, 1.0);
+    let clump = flow_grain(gp, vflow, 5.5, fpx, 9.0);
+    let gfine = fine.x;
+    let gclump = clump.x;
     let speck = 0.85 * gfine + 0.35 * gclump;
     let rough = 0.12 * gfine;
 
@@ -187,6 +224,7 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     pix.out_px_per_cover = opx;
     pix.out_px_per_ref = px;
     pix.ref_px_per_out = fpx;
+    pix.edge = edge;
     pix.field_step = fo;
     pix.line = c;
     pix.flow_label = m;
@@ -199,6 +237,7 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     pix.grain_fine = gfine;
     pix.grain_clump = gclump;
     pix.speckle = speck;
+    pix.speckle_slope = length(0.85 * fine.yz + 0.35 * clump.yz);
     pix.edge_rough = rough;
     pix.black = black;
     return pix;
@@ -228,7 +267,7 @@ fn stream_color(pix: Pixel) -> vec3f {
     let lc = sample_field(ls).r;
     let shade_by = clamp(lc / glen * px + 0.5, 0.0, 1.0);
     sc *= 1.0 - 0.4 * shade_by;
-    let cov = clamp((-c / glen + rough) * px + 0.5, 0.0, 1.0);
+    let cov = clamp((-c / glen + rough) * pix.edge + 0.5, 0.0, 1.0);
     return mix(black, sc, cov);
 }
 
@@ -246,18 +285,19 @@ fn band_color(pix: Pixel) -> vec3f {
     let rough = pix.edge_rough;
     let black = pix.black;
     var col = black;
-    let b = band_at(c, glen, gh, m, px, rough);
+    let b = band_at(c, glen, gh, m, pix.edge, rough);
     if (b.coverage > 0.0) {
-        // speckle where the grain beats the local density; soft edges when minified
+        // speckle where the grain beats the local density; its edges soften when minified,
+        // and never cut sharper than a pixel can show
         let thr = (0.5 - b.density) * 2.6;
-        let aa = 0.3 + 0.6 * smoothstep(0.5, 2.0, fpx);
+        let aa = max(0.3 + 0.6 * smoothstep(0.5, 2.0, 0.5 * fpx * u.supersampling), 0.7 * pix.speckle_slope / pix.edge);
         let dots = smoothstep(thr - aa, thr + aa, speck) * smoothstep(0.0, 0.08, b.density);
         var t = b.tone + 0.05 * gclump * smoothstep(0.85, 0.6, b.tone) + 0.03 * gfine - 0.44 * dots;
         col = mix(black, lilac(t), b.coverage);
     }
-    // stripes too fine for the pixels settle to their average instead of beating
+    // stripes too fine for the pixels settle to their average before they can beat
     let per_px = px / glen;
-    col = mix(col, mix(black, lilac(0.5), DUTY), smoothstep(3.5, 1.6, per_px));
+    col = mix(col, mix(black, lilac(0.5), DUTY), smoothstep(3.4, 2.0, per_px));
     return col;
 }
 
@@ -484,7 +524,10 @@ fn liquid_reflection(pix: Pixel, scn: Scene, ball: Ball, surf: BallSurface) -> M
     let rh = bpl + rdir * rt;
     let rcov = rh.xy / max(rh.z, 1e-3) * FOCAL + 0.5;
     let rpos = cover_to_pos(rcov);
-    let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * (4.0 + P(P_REFLECTION_BLUR) + 4.0 * pow(1.0 - bz, 2.0)) + 1.5 * fo;
+    // the blur is a width on the cover, so the mirrored lines sharpen as the view closes in;
+    // it never falls below the pixel's own footprint
+    let blur = 0.19 * (4.0 + P(P_REFLECTION_BLUR) + 4.0 * pow(1.0 - bz, 2.0)) * pix.out_px_per_ref;
+    let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * max(blur, pix.out_px_per_ref / pix.edge) + 1.5 * fo;
     var refl = vec3f(0.0);
     if (rt > 0.0 && rh.z > 0.0 && rd2 < 1.0) {
         var rc = 0.0;
@@ -542,7 +585,6 @@ fn add_bounced_light(scol2_in: vec3f, g: f32, pix: Pixel, scn: Scene, mir: Mirro
 // waterline the liquid climbs the ball in a rolled lip that catches the light, with glints
 // carried along it by the flow; the ball just above sits in its shade.
 fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec3f {
-    let opx = pix.out_px_per_cover;
     let px = pix.out_px_per_ref;
     let c = pix.line;
     let m = pix.flow_label;
@@ -553,7 +595,7 @@ fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec
     let rd2 = ball.disc_r;
     var col = col_in;
     var scol2 = scol2_in;
-    let liquid = clamp(c / glen * px + 0.5, 0.0, 1.0);          // 1 on bands and gaps, 0 on the stream
+    let liquid = clamp(c / glen * pix.edge + 0.5, 0.0, 1.0);    // 1 on bands and gaps, 0 on the stream
     let near = select(0.0, 1.0, rel.y < 0.0);
     let low = smoothstep(0.5, 0.56, d2.y - 0.25 * d2.x);     // far-side bands rejoin in front low on the right
     let front = liquid * max(near, low);
@@ -561,7 +603,7 @@ fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec
     let wl = c / glen;                                         // ref px from the waterline, + on the liquid
     let side = max(near, low) * smoothstep(1.0, 0.96, rd2);
     scol2 *= 1.0 - 0.45 * side * exp(min(wl, 0.0) / 3.5);
-    var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);
+    var cov = clamp((1.0 - rd2) * BALL_R * REFPX * pix.edge + 0.5, 0.0, 1.0) * (1.0 - front);
     if (P(P_DEBUG_BALL_OUTLINE) > 0.5) { cov *= 0.35; }
     col = mix(col, scol2, cov);
     let facing = 0.3 + 0.7 * smoothstep(-0.5, 0.6, dot(-gh, LIGHT));
