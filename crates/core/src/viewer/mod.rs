@@ -19,7 +19,7 @@ use touch::{Gesture, Touches};
 use ui::{Command, Info, Overlay, Painted, Ring};
 use web_time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::PhysicalPosition;
 use winit::error::{EventLoopError, OsError};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -97,6 +97,8 @@ const FPS_SMOOTHING: f32 = 0.05;
 #[expect(clippy::struct_excessive_bools, reason = "independent pieces of the event loop's state")]
 struct App {
     settings: Settings,
+    /// The settings the canvas was last brought in line with; it follows `settings` between frames.
+    drawn_with: Settings,
     sources: Sources,
     store: Option<Box<dyn Store>>,
     issues: Vec<String>,
@@ -133,15 +135,7 @@ struct App {
 }
 
 fn frame_uniforms(settings: &Settings, camera: &Camera, time: f32, gfx: &Gfx) -> Uniforms {
-    let size: PhysicalSize<u32> = gfx.size();
-    Uniforms::new(
-        [size.width, size.height],
-        settings.render.supersampling,
-        gfx.field_step(),
-        time,
-        camera.view(gfx.viewport()).to_array(),
-        settings.params.0,
-    )
+    gfx.canvas.uniforms(time, camera.view(gfx.canvas.viewport()).to_array(), settings.params.0)
 }
 
 impl App {
@@ -177,13 +171,10 @@ impl App {
         }
     }
 
-    /// Takes on `new` settings, applying what the uniforms do not carry and queueing a save.
+    /// Takes on `new` settings and queues a save; the canvas follows before the next frame.
     fn change(&mut self, new: Settings) {
         if new == self.settings {
             return;
-        }
-        if let Some(g) = self.gfx.as_mut() {
-            g.apply(&self.settings, &new);
         }
         self.camera.tuning = new.camera;
         self.settings = new;
@@ -228,7 +219,7 @@ impl App {
         let info = self.info();
         let mut settings = self.settings.clone();
         let overlay = self.overlay.as_mut()?;
-        let (painted, commands) = overlay.frame(&g.window, &mut settings, &info, ring, g.surface_ratio());
+        let (painted, commands) = overlay.frame(&g.window, &mut settings, &info, ring, g.canvas.surface_ratio());
         self.change(settings);
         for command in commands {
             self.command(command);
@@ -342,8 +333,12 @@ impl App {
             self.save();
         }
         let Some(g) = self.gfx.as_mut() else { return };
-        g.observe_frame(dt);
-        self.camera.advance(dt, g.viewport());
+        if self.drawn_with != self.settings {
+            g.canvas.apply(&self.drawn_with, &self.settings);
+            self.drawn_with.clone_from(&self.settings);
+        }
+        g.canvas.observe_frame(dt);
+        self.camera.advance(dt, g.canvas.viewport());
         if let Some(frame) = g.acquire() {
             let painted = self.overlay_frame(now);
             let Some(g) = self.gfx.as_mut() else { return };
@@ -359,7 +354,7 @@ impl App {
 
     fn touch(&mut self, touch: Touch) {
         let Some(g) = self.gfx.as_ref() else { return };
-        let viewport = g.viewport();
+        let viewport = g.canvas.viewport();
         self.camera.hold(matches!(touch.phase, TouchPhase::Started | TouchPhase::Moved));
         match self.touches.event(touch.phase, touch.id, [touch.location.x, touch.location.y]) {
             Some(Gesture::Pan(delta)) => self.camera.pan(delta, viewport),
@@ -374,7 +369,7 @@ impl App {
     fn on_ball(&self) -> bool {
         self.gfx
             .as_ref()
-            .is_some_and(|g| on_ball(self.camera.cover_point([self.cursor.x, self.cursor.y], g.viewport())))
+            .is_some_and(|g| on_ball(self.camera.cover_point([self.cursor.x, self.cursor.y], g.canvas.viewport())))
     }
 
     /// Pointer and touch input, once egui has passed on it.
@@ -385,7 +380,7 @@ impl App {
                 if self.dragging
                     && let Some(g) = self.gfx.as_ref()
                 {
-                    self.camera.pan([position.x - self.cursor.x, position.y - self.cursor.y], g.viewport());
+                    self.camera.pan([position.x - self.cursor.x, position.y - self.cursor.y], g.canvas.viewport());
                 }
                 self.cursor = position;
                 let on = self.on_ball();
@@ -409,7 +404,7 @@ impl App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_LINE,
                 };
                 if let Some(g) = self.gfx.as_ref() {
-                    self.camera.zoom(lines, [self.cursor.x, self.cursor.y], g.viewport());
+                    self.camera.zoom(lines, [self.cursor.x, self.cursor.y], g.canvas.viewport());
                 }
             },
             WindowEvent::Touch(touch) if !consumed && !locked => self.touch(touch),
@@ -450,7 +445,7 @@ impl ApplicationHandler<Started> for App {
         match event.0 {
             Ok(gfx) => {
                 gfx.window.request_redraw();
-                let mut overlay = Overlay::new(&gfx.window, gfx.max_texture_side());
+                let mut overlay = Overlay::new(&gfx.window, gfx.canvas.max_texture_side());
                 if !self.issues.is_empty() {
                     let n = self.issues.len();
                     overlay.toast(format!("The settings file had {n} problem(s); see the menu"), true);
@@ -490,7 +485,7 @@ impl ApplicationHandler<Started> for App {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(g) = self.gfx.as_mut() {
-                    g.resize(size);
+                    g.canvas.resize(size);
                 }
             },
             WindowEvent::Occluded(hidden) => {
@@ -525,6 +520,7 @@ fn app(event_loop: &EventLoop<Started>, launch: Launch, hooks: Hooks, spawn: Box
     App {
         camera: Camera::new(settings.camera),
         view: debug,
+        drawn_with: settings.clone(),
         settings,
         sources,
         store,

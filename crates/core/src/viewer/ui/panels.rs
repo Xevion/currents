@@ -9,6 +9,11 @@ use super::theme::{METRICS, PALETTE};
 use crate::params::PARAM_SLOTS;
 use crate::settings::{Action, CATALOG, Group, ParamSpec, Settings, limits};
 
+const MEGA: f32 = 1e6;
+/// The pixel cap a freshly ticked box starts at, about a 2560x1440 window.
+const DEFAULT_CAP_MP: f32 = 3.7;
+const MIN_CAP_MP: f32 = 0.1;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Display, VariantArray)]
 pub(crate) enum Tab {
     #[default]
@@ -102,12 +107,25 @@ fn render(ui: &mut Ui, settings: &mut Settings, info: &Info) {
     ui.separator();
     let mut capped = r.max_pixels > 0.0;
     if ui.checkbox(&mut capped, "Cap shaded pixels").changed() {
-        r.max_pixels = if capped { 3_686_400.0 } else { 0.0 };
+        r.max_pixels = if capped { DEFAULT_CAP_MP * MEGA } else { 0.0 };
     }
     if capped {
-        float(ui, "Max pixels", &mut r.max_pixels, 100_000.0..=*limits::MAX_PIXELS.end(), "Pixels shaded per frame.");
+        let mut mp = r.max_pixels / MEGA;
+        let slider = egui::Slider::new(&mut mp, MIN_CAP_MP..=*limits::MAX_PIXELS.end() / MEGA)
+            .logarithmic(true)
+            .step_by(0.1)
+            .suffix(" MP")
+            .text("Max pixels");
+        let response = ui.add(slider);
+        help(&response, "Millions of pixels shaded per frame.");
+        if response.changed() {
+            r.max_pixels = (mp * 10.0).round() / 10.0 * MEGA;
+        }
     }
-    float(ui, "Render scale", &mut r.render_scale, limits::RENDER_SCALE, "Per-axis scale of the shaded picture.");
+    help(
+        &ui.add(egui::Slider::new(&mut r.render_scale, limits::RENDER_SCALE).step_by(0.05).text("Render scale")),
+        "Per-axis scale of the shaded picture.",
+    );
     flag(ui, "Adapt to frame rate", &mut r.adaptive, "Shade fewer pixels while frames run long.");
     ui.separator();
     ui.label(format!("{:.0} fps  |  field {:.1} ms  |  shade {:.1} ms", info.fps, info.field_ms, info.shade_ms));
@@ -167,8 +185,8 @@ fn advanced(ui: &mut Ui, settings: &mut Settings) {
     egui::Grid::new("slots").num_columns(4).show(ui, |ui| {
         for slot in 0..PARAM_SLOTS {
             let name = CATALOG.iter().find(|s| s.slot == slot).map_or("unused", |s| s.key);
-            ui.label(format!("{slot}")).on_hover_text(name);
-            ui.add(egui::DragValue::new(settings.params.get_mut(slot)).speed(0.01));
+            let label = ui.label(format!("{slot}")).on_hover_text(name);
+            ui.add(egui::DragValue::new(settings.params.get_mut(slot)).speed(0.01)).labelled_by(label.id);
             if slot % 2 == 1 {
                 ui.end_row();
             }
@@ -248,6 +266,7 @@ mod tests {
     use assert2::check;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+    use rstest::rstest;
 
     use super::*;
 
@@ -257,9 +276,8 @@ mod tests {
         commands: Vec<Command>,
     }
 
-    fn harness() -> Harness<'static, State> {
-        let state =
-            State { menu: Menu { open: true, tab: Tab::Wallpaper }, settings: Settings::default(), commands: vec![] };
+    fn harness(tab: Tab, settings: Settings) -> Harness<'static, State> {
+        let state = State { menu: Menu { open: true, tab }, settings, commands: vec![] };
         Harness::builder().with_size([520.0, 720.0]).build_ui_state(
             |ui, state: &mut State| {
                 super::super::theme::install(ui.ctx());
@@ -270,9 +288,62 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Edge {
+        Low,
+        Default,
+        High,
+    }
+
+    /// Every setting the menu shows at one end of what it offers.
+    fn at(edge: Edge) -> Settings {
+        let mut s = Settings::default();
+        let pick = |low: f32, high: f32| match edge {
+            Edge::Low => low,
+            Edge::High => high,
+            Edge::Default => unreachable!(),
+        };
+        if matches!(edge, Edge::Default) {
+            return s;
+        }
+        let end = |r: &RangeInclusive<u32>| if matches!(edge, Edge::Low) { *r.start() } else { *r.end() };
+        let r = &mut s.render;
+        r.supersampling = end(&limits::SUPERSAMPLING);
+        r.field_step = end(&limits::FIELD_STEP);
+        r.fps_cap = end(&limits::FPS_CAP);
+        r.max_pixels = pick(MIN_CAP_MP * MEGA, *limits::MAX_PIXELS.end());
+        r.render_scale = pick(*limits::RENDER_SCALE.start(), *limits::RENDER_SCALE.end());
+        r.adaptive = matches!(edge, Edge::High);
+        r.temporal = matches!(edge, Edge::High);
+        s.motion.speed = pick(*limits::SPEED.start(), *limits::SPEED.end());
+        let c = &mut s.camera;
+        c.locked = matches!(edge, Edge::High);
+        c.ease_secs = pick(*limits::EASE_SECS.start(), *limits::EASE_SECS.end());
+        c.return_secs = pick(*limits::RETURN_SECS.start(), *limits::RETURN_SECS.end());
+        c.give = pick(*limits::GIVE.start(), *limits::GIVE.end());
+        c.zoom_per_line = pick(*limits::ZOOM_PER_LINE.start(), *limits::ZOOM_PER_LINE.end());
+        for spec in &CATALOG {
+            *s.params.get_mut(spec.slot) = pick(spec.min, spec.max);
+        }
+        s
+    }
+
+    #[rstest]
+    fn every_tab_shows_any_settings_without_changing_them(
+        #[values(Tab::Params, Tab::Render, Tab::Motion, Tab::Wallpaper, Tab::Controls, Tab::Advanced)] tab: Tab,
+        #[values(Edge::Low, Edge::Default, Edge::High)] edge: Edge,
+    ) {
+        let settings = at(edge);
+        check!(settings.clone().clamp().is_empty());
+        let mut harness = harness(tab, settings.clone());
+        harness.run();
+        check!(harness.state().settings == settings);
+        check!(harness.state().commands.is_empty());
+    }
+
     #[test]
     fn toggling_a_wallpaper_option_edits_the_settings() {
-        let mut harness = harness();
+        let mut harness = harness(Tab::Wallpaper, Settings::default());
         harness.get_by_label("Hint at the menu key").click();
         harness.run();
         check!(!harness.state().settings.wallpaper.hint);
@@ -280,9 +351,19 @@ mod tests {
 
     #[test]
     fn the_reset_button_asks_for_the_defaults() {
-        let mut harness = harness();
+        let mut harness = harness(Tab::Wallpaper, Settings::default());
         harness.get_by_label("Reset to defaults").click();
         harness.run();
         check!(harness.state().commands.contains(&Command::ResetDefaults));
+    }
+
+    #[test]
+    fn ticking_the_pixel_cap_starts_it_on_a_whole_tenth_of_a_megapixel() {
+        let mut harness = harness(Tab::Render, Settings::default());
+        harness.get_by_label("Cap shaded pixels").click();
+        harness.run();
+        let cap = harness.state().settings.render.max_pixels / MEGA;
+        check!(((cap * 10.0).round() - cap * 10.0).abs() < 1e-3);
+        check!(cap > 0.0);
     }
 }
