@@ -25,7 +25,7 @@ use winit::window::{Window, WindowId};
 use crate::camera::{Camera, PIXELS_PER_LINE};
 use crate::gpu;
 use crate::params::ParamBlock;
-use crate::renderer::{PassTimes, Uniforms};
+use crate::renderer::{FieldView, PassTimes, Uniforms};
 use crate::shaders::Sources;
 
 const TITLE: &str = "currents";
@@ -59,6 +59,8 @@ pub struct Settings {
     pub params: ParamBlock,
     /// Pixel budget for the surface; `None` renders every window pixel.
     pub budget: Option<Budget>,
+    /// The field view to start in instead of the shaded picture; D cycles through them.
+    pub debug: Option<FieldView>,
 }
 
 /// Page callbacks: `on_ready` after the first frame, `on_error` with the reason the viewer stopped.
@@ -85,6 +87,7 @@ struct App {
     gfx: Option<Gfx>,
     hooks: Hooks,
     camera: Camera,
+    view: Option<FieldView>,
     paused: bool,
     time: f32,
     last: Instant,
@@ -130,7 +133,7 @@ impl App {
         if cfg!(target_arch = "wasm32") {
             return;
         }
-        if let Some(title) = self.title.tick(now, passes, self.time, self.paused)
+        if let Some(title) = self.title.tick(now, passes, self.time, self.paused, self.view)
             && let Some(g) = self.gfx.as_ref()
         {
             g.window.set_title(&title);
@@ -144,7 +147,7 @@ impl App {
         g.observe_frame(dt);
         let uniforms = frame_uniforms(&self.settings, &self.camera, self.time, g);
         if let Some(frame) = g.acquire() {
-            let passes = g.draw(frame, &uniforms);
+            let passes = g.draw(frame, &uniforms, self.view);
             self.update_title(now, passes);
             if let Some(on_ready) = self.hooks.on_ready.take() {
                 on_ready();
@@ -242,6 +245,7 @@ impl ApplicationHandler<Started> for App {
                     Key::Named(NamedKey::Space) => self.paused = !self.paused,
                     Key::Named(NamedKey::Escape) if cfg!(not(target_arch = "wasm32")) => el.exit(),
                     Key::Character("r") => self.camera.reset(),
+                    Key::Character("d") => self.view = FieldView::cycle(self.view),
                     _ => {},
                 }
             },
@@ -259,6 +263,7 @@ fn app(event_loop: &EventLoop<Started>, settings: Settings, hooks: Hooks, spawn:
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let now = Instant::now();
     App {
+        view: settings.debug,
         settings,
         instance,
         spawn,

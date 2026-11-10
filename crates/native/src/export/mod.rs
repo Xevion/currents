@@ -64,7 +64,7 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
 
         let started = Instant::now();
         let mut enc = device.create_command_encoder(&Default::default());
-        renderer.render(&device, &queue, &mut enc, &uniforms);
+        renderer.render(&device, &queue, &mut enc, &uniforms, common.debug);
         readback.copy_from(&mut enc, renderer.color());
         queue.submit([enc.finish()]);
         renderer.after_submit();

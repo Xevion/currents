@@ -4,13 +4,15 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 pub(crate) use currents_core::View;
+use currents_core::renderer::FieldView;
 use currents_core::shaders::{self, Sources};
 use currents_core::viewer::Settings;
 use currents_core::{ParamBlock, ParamOverride};
 pub(crate) use size::OutputSize;
 
 /// Live rendering of the Currents cover. With no subcommand, opens the interactive viewer
-/// (scroll to zoom at the cursor, drag to pan, space to pause, R to reset, Esc to quit).
+/// (scroll to zoom at the cursor, drag to pan, space to pause, R to reset, D to cycle the
+/// field debug views, Esc to quit).
 #[derive(Parser)]
 pub(crate) struct Cli {
     #[command(flatten)]
@@ -33,6 +35,9 @@ pub(crate) struct Common {
     /// Tuning parameter override, INDEX=VALUE (repeatable)
     #[arg(short = 'p', long = "param", global = true)]
     pub(crate) params: Vec<ParamOverride>,
+    /// Draw a view of the flow field instead of the picture: line, label, velocity or density
+    #[arg(long, global = true)]
+    pub(crate) debug: Option<FieldView>,
 }
 
 impl Common {
@@ -58,6 +63,7 @@ impl Common {
             supersampling: self.supersampling(),
             params: self.param_array(),
             budget: None,
+            debug: self.debug,
         })
     }
 }

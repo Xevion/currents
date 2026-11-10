@@ -12,7 +12,8 @@ const SUPERSAMPLING: u32 = 2;
 const MAX_PIXELS: f64 = 3_686_400.0;
 
 /// Settings from the page URL: `speed`, `ss`, `p=INDEX=VALUE` (repeatable), `pixels` (the
-/// budget) and `scale` (a fixed render scale, which turns off adapting it to the frame rate).
+/// budget), `scale` (a fixed render scale, which turns off adapting it to the frame rate) and
+/// `debug` (a field view to start in).
 pub(crate) fn from_url() -> Settings {
     let params =
         web_sys::window().and_then(|w| w.location().search().ok()).and_then(|s| UrlSearchParams::new_with_str(&s).ok());
@@ -34,5 +35,6 @@ pub(crate) fn from_url() -> Settings {
             scale: scale.unwrap_or(1.0),
             adaptive: scale.is_none(),
         }),
+        debug: get("debug").and_then(|s| s.trim().parse().ok()),
     }
 }

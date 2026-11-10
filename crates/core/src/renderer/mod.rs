@@ -1,6 +1,8 @@
+mod debug;
 mod pass;
 mod timing;
 
+pub use debug::{FieldView, UnknownView};
 pub(crate) use pass::draw_fullscreen;
 use pass::{Inputs, Pass};
 pub use timing::PassTimes;
@@ -46,6 +48,8 @@ pub struct Renderer {
     ubuf: wgpu::Buffer,
     field: Pass,
     shade: Pass,
+    /// One pipeline per `FieldView`, in its order, bound like the shade pass.
+    debug: Vec<wgpu::RenderPipeline>,
     targets: Option<Targets>,
     sampler: wgpu::Sampler,
     timing: Option<Timing>,
@@ -92,12 +96,19 @@ impl Renderer {
             Inputs { count: 1, filterable },
             COLOR_FORMAT,
         );
+        let debug_source = sources.assemble(include_str!("debug.wgsl"));
+        let debug = FieldView::ALL
+            .map(|view| {
+                let constants = [("mode", f64::from(view.mode()))];
+                pass::pipeline(device, view.name(), debug_source.clone(), &shade.layout, &constants, COLOR_FORMAT)
+            })
+            .to_vec();
         let sampler = if filterable {
             linear_sampler(device)
         } else {
             device.create_sampler(&wgpu::SamplerDescriptor::default())
         };
-        Self { ubuf, field, shade, targets: None, sampler, timing: Timing::new(device, queue) }
+        Self { ubuf, field, shade, debug, targets: None, sampler, timing: Timing::new(device, queue) }
     }
 
     /// Call after submitting the encoder passed to `render`: starts reading back its timestamps.
@@ -141,14 +152,16 @@ impl Renderer {
         true
     }
 
-    /// Renders one frame into the internal colour texture; `uniforms.resolution` sets its size.
-    /// Returns whether that texture was recreated, so views of `color` taken earlier are stale.
+    /// Renders one frame into the internal colour texture; `uniforms.resolution` sets its size,
+    /// and `view` replaces the shaded picture with a view of the field. Returns whether that
+    /// texture was recreated, so views of `color` taken earlier are stale.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         enc: &mut wgpu::CommandEncoder,
         uniforms: &Uniforms,
+        view: Option<FieldView>,
     ) -> bool {
         let size = TargetSize {
             width: uniforms.resolution[0] as u32,
@@ -160,7 +173,8 @@ impl Renderer {
         let t = self.targets.as_ref().expect("ensure_targets left the targets unset");
         let writes = |pass| self.timing.as_ref().map(|tm| tm.pass_writes(pass));
         draw_fullscreen(enc, &t.field_view, &self.field.pipeline, &t.field_bind, writes(0));
-        draw_fullscreen(enc, &t.color_view, &self.shade.pipeline, &t.shade_bind, writes(1));
+        let colour = view.map_or(&self.shade.pipeline, |v| &self.debug[v as usize]);
+        draw_fullscreen(enc, &t.color_view, colour, &t.shade_bind, writes(1));
         if let Some(tm) = self.timing.as_mut() {
             tm.resolve(enc);
         }
@@ -196,5 +210,14 @@ mod tests {
         let source = shade_source(&Sources::embedded(), filterable);
         validate("shade", &source);
         to_webgl("shade", &source, &[]);
+    }
+
+    #[test]
+    fn debug_views_validate_and_translate_for_webgl() {
+        let source = Sources::embedded().assemble(include_str!("debug.wgsl"));
+        validate("debug", &source);
+        for view in FieldView::ALL {
+            to_webgl(view.name(), &source, &[("mode", f64::from(view.mode()))]);
+        }
     }
 }

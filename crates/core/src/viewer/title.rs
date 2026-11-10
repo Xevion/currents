@@ -1,6 +1,6 @@
 use web_time::Instant;
 
-use crate::renderer::PassTimes;
+use crate::renderer::{FieldView, PassTimes};
 
 /// Seconds between window title updates.
 const TITLE_INTERVAL: f32 = 0.5;
@@ -17,16 +17,24 @@ impl FrameCounter {
     }
 
     /// Counts one frame drawn at `now`; returns the title when the interval has elapsed.
-    pub(crate) fn tick(&mut self, now: Instant, passes: PassTimes, time: f32, paused: bool) -> Option<String> {
+    pub(crate) fn tick(
+        &mut self,
+        now: Instant,
+        passes: PassTimes,
+        time: f32,
+        paused: bool,
+        view: Option<FieldView>,
+    ) -> Option<String> {
         self.frames += 1;
         let dt = (now - self.since).as_secs_f32();
         if dt <= TITLE_INTERVAL {
             return None;
         }
         let state = if paused { "paused" } else { "running" };
+        let view = view.map_or("shaded", FieldView::name);
         let PassTimes { field: f, shade: s } = passes;
         let title = format!(
-            "currents | {:.0} fps | field {f:.1}ms shade {s:.1}ms | t={time:.1} | {state}",
+            "currents | {:.0} fps | field {f:.1}ms shade {s:.1}ms | t={time:.1} | {state} | {view}",
             self.frames as f32 / dt,
         );
         self.frames = 0;

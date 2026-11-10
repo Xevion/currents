@@ -26,73 +26,90 @@ impl Pass {
         inputs: Inputs,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(name),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-        let mut entries = vec![wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }];
-        entries.extend((0..inputs.count).map(|i| wgpu::BindGroupLayoutEntry {
-            binding: i + 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: inputs.filterable },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        }));
-        if inputs.count > 0 {
-            let sampler = if inputs.filterable {
-                wgpu::SamplerBindingType::Filtering
-            } else {
-                wgpu::SamplerBindingType::NonFiltering
-            };
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: inputs.count + 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(sampler),
-                count: None,
-            });
-        }
-        let layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries: &entries });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(name),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(name),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let layout = bind_layout(device, name, inputs);
+        let pipeline = pipeline(device, name, source, &layout, &[], format);
         Self { pipeline, layout }
     }
+}
+
+/// A uniform buffer and `inputs` textures (plus their sampler) in group 0.
+fn bind_layout(device: &wgpu::Device, name: &str, inputs: Inputs) -> wgpu::BindGroupLayout {
+    let mut entries = vec![wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }];
+    entries.extend((0..inputs.count).map(|i| wgpu::BindGroupLayoutEntry {
+        binding: i + 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: inputs.filterable },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }));
+    if inputs.count > 0 {
+        let sampler = if inputs.filterable {
+            wgpu::SamplerBindingType::Filtering
+        } else {
+            wgpu::SamplerBindingType::NonFiltering
+        };
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: inputs.count + 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(sampler),
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries: &entries })
+}
+
+/// A fullscreen pipeline for `source` bound through `layout`; `constants` fill its overrides.
+pub(super) fn pipeline(
+    device: &wgpu::Device,
+    name: &str,
+    source: String,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(name),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(name),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    let options = wgpu::PipelineCompilationOptions { constants, ..Default::default() };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(name),
+        layout: Some(&pl),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            compilation_options: options.clone(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            compilation_options: options,
+            targets: &[Some(format.into())],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Clears `target` to black, then draws one fullscreen triangle with `pipeline` and `bind`.

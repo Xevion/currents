@@ -10,7 +10,7 @@ use super::scale::RenderScale;
 use super::{CreateSurfaceSnafu, Error, GpuSnafu, NoSurfaceConfigSnafu, PipelinesSnafu, Settings};
 use crate::camera::Viewport;
 use crate::gpu::{self, Gpu};
-use crate::renderer::{PassTimes, Renderer, Uniforms};
+use crate::renderer::{FieldView, PassTimes, Renderer, Uniforms};
 
 /// The window and everything that draws into it.
 pub(crate) struct Gfx {
@@ -102,9 +102,14 @@ impl Gfx {
     }
 
     /// Renders a frame and presents it on `frame`; returns the pass times of the latest frame read back.
-    pub(crate) fn draw(&mut self, frame: wgpu::SurfaceTexture, uniforms: &Uniforms) -> PassTimes {
+    pub(crate) fn draw(
+        &mut self,
+        frame: wgpu::SurfaceTexture,
+        uniforms: &Uniforms,
+        view: Option<FieldView>,
+    ) -> PassTimes {
         let mut enc = self.device.create_command_encoder(&Default::default());
-        if self.renderer.render(&self.device, &self.queue, &mut enc, uniforms) {
+        if self.renderer.render(&self.device, &self.queue, &mut enc, uniforms, view) {
             self.blit.bind(&self.device, self.renderer.color_view());
         }
         let view = frame.texture.create_view(&Default::default());
