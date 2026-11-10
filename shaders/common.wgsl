@@ -1,11 +1,11 @@
-struct U {
+struct Uniforms {
     resolution: vec2f,
     time: f32,
-    fscale: f32,
+    field_scale: f32,
     view: vec4f,
     params: array<vec4f, 8>,
 }
-@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(0) var<uniform> u: Uniforms;
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -59,8 +59,7 @@ const BALL_C = vec2f(0.543, 0.661);
 const BALL_R = 0.1205;
 const REFPX = 1500.0; // "px" below means pixels of the 1500px reference cover
 
-const FLOW_U = 4.0;     // periods per second
-const STEPS = 64;
+const DUTY = 0.52;
 
 struct Cam {
     n: vec3f,   // unit plane normal, pointing away from camera
@@ -84,13 +83,26 @@ fn camera() -> Cam {
 
 fn ray(cover: vec2f) -> vec3f { return vec3f(cover - 0.5, FOCAL); }
 
-fn plane_q(c: Cam, cover: vec2f) -> vec2f {
+fn cover_to_plane(c: Cam, cover: vec2f) -> vec2f {
     let r = ray(cover);
     let hit = r * (c.d / dot(c.n, r));
     return vec2f(dot(hit, c.eu), dot(hit, c.ev));
 }
 
-fn srgb(r: f32, g: f32, b: f32) -> vec3f { return vec3f(r, g, b) / 255.0; }
+fn plane_to_cover(c: Cam, q: vec2f) -> vec2f {
+    let p3 = c.eu * q.x + c.ev * q.y + c.n * c.d;
+    return p3.xy / p3.z * FOCAL + 0.5;
+}
+
+fn pos_to_cover(pos: vec2f) -> vec2f {
+    return u.view.xy + pos / u.resolution * (u.view.zw - u.view.xy);
+}
+
+fn cover_to_pos(cover: vec2f) -> vec2f {
+    return (cover - u.view.xy) / (u.view.zw - u.view.xy) * u.resolution;
+}
+
+fn rgb255(r: f32, g: f32, b: f32) -> vec3f { return vec3f(r, g, b) / 255.0; }
 
 fn hash22(p: vec2f) -> vec2f {
     var p3 = fract(vec3f(p.xyx) * vec3f(0.1031, 0.1030, 0.0973));
@@ -105,7 +117,7 @@ fn hash12(p: vec2f) -> f32 {
 }
 
 // Gradient noise: value in x, derivative in yz.
-fn noised(p: vec2f) -> vec3f {
+fn gradient_noise(p: vec2f) -> vec3f {
     let i = floor(p);
     let f = fract(p);
     let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
@@ -125,7 +137,7 @@ fn noised(p: vec2f) -> vec3f {
     return vec3f(v, d);
 }
 
-fn vnoise(p: vec2f) -> f32 {
+fn value_noise(p: vec2f) -> f32 {
     let i = floor(p);
     let f = fract(p);
     let w = f * f * (3.0 - 2.0 * f);
@@ -133,12 +145,11 @@ fn vnoise(p: vec2f) -> f32 {
                mix(hash12(i + vec2f(0.0, 1.0)), hash12(i + vec2f(1.0, 1.0)), w.x), w.y);
 }
 
-
 struct Scene {
     cam: Cam,
-    qb: vec2f,   // obstacle centre on the plane
-    a: f32,      // obstacle radius on the plane
-    g: vec2f,    // plane direction of screen-down at the ball
+    centre: vec2f, // obstacle centre on the plane
+    radius: f32,   // obstacle radius on the plane
+    down: vec2f,   // plane direction of screen-down at the ball
 }
 
 // The ball is a screen-space circle; the flow obstacle is a plane disc under its lower half,
@@ -147,23 +158,8 @@ fn scene() -> Scene {
     var s: Scene;
     s.cam = camera();
     let oc = BALL_C + BALL_R * vec2f(-0.12 + P(P_OBSTACLE_SHIFT_X), -0.25 + P(P_OBSTACLE_SHIFT_Y));
-    s.qb = plane_q(s.cam, oc);
-    s.a = length(plane_q(s.cam, oc + vec2f(0.84 * BALL_R, 0.0)) - s.qb) * (1.0 + P(P_OBSTACLE_SCALE));
-    s.g = normalize(plane_q(s.cam, oc + vec2f(0.0, 0.01)) - s.qb);
+    s.centre = cover_to_plane(s.cam, oc);
+    s.radius = length(cover_to_plane(s.cam, oc + vec2f(0.84 * BALL_R, 0.0)) - s.centre) * (1.0 + P(P_OBSTACLE_SCALE));
+    s.down = normalize(cover_to_plane(s.cam, oc + vec2f(0.0, 0.01)) - s.centre);
     return s;
 }
-
-fn project(c: Cam, q: vec2f) -> vec2f {
-    let p3 = c.eu * q.x + c.ev * q.y + c.n * c.d;
-    return p3.xy / p3.z * FOCAL + 0.5;
-}
-
-fn cover_of(pos: vec2f) -> vec2f {
-    return u.view.xy + pos / u.resolution * (u.view.zw - u.view.xy);
-}
-
-fn pos_of(cover: vec2f) -> vec2f {
-    return (cover - u.view.xy) / (u.view.zw - u.view.xy) * u.resolution;
-}
-
-const DUTY = 0.52;

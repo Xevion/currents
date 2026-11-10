@@ -2,8 +2,8 @@
 @group(0) @binding(2) var smp: sampler;
 
 // Field at a shade-pixel position, filtered between its coarser texels.
-fn fl(p: vec2f) -> vec4f {
-    return textureSampleLevel(field, smp, p / (u.fscale * vec2f(textureDimensions(field))), 0.0);
+fn sample_field(p: vec2f) -> vec4f {
+    return textureSampleLevel(field, smp, p / (u.field_scale * vec2f(textureDimensions(field))), 0.0);
 }
 
 fn blob(d: vec2f, amp: f32, c: vec2f, rot: vec2f, inv: vec2f) -> f32 {
@@ -43,26 +43,26 @@ fn ball_lum(d: vec2f) -> f32 {
 const LIGHT = vec2f(-0.8716, -0.4903);   // toward the light, on screen
 // toward the key light in camera space, as placed by the ball's main highlight
 const LIGHT3 = vec3f(-0.734, -0.513, -0.445);
-const FLOW_T = 0.4;                      // grain refresh period for the moving liquid
+const GRAIN_PERIOD = 0.4;                      // grain refresh period for the moving liquid
 
 // Grain of a fixed physical size (cell in ref px), about unit spread, two octaves. Zooming
 // magnifies it; fpx (ref px per output px) fades out what is finer than a pixel.
 fn grain(p: vec2f, cell: f32, fpx: f32) -> f32 {
     let q = p / cell;
     let k = fpx / cell;
-    let a = noised(q).x * (1.0 - smoothstep(0.4, 0.9, k));
-    let b = noised(q * 2.13 + 7.3).x * 0.55 * (1.0 - smoothstep(0.4, 0.9, 2.13 * k));
+    let a = gradient_noise(q).x * (1.0 - smoothstep(0.4, 0.9, k));
+    let b = gradient_noise(q * 2.13 + 7.3).x * 0.55 * (1.0 - smoothstep(0.4, 0.9, 2.13 * k));
     return (a + b) * 4.4;
 }
 
 // Grain carried by the liquid at screen velocity v: two copies drift with it and take turns,
 // each restarting while hidden, so it never stretches far.
 fn flow_grain(gp: vec2f, v: vec2f, cell: f32, fpx: f32, seed: f32) -> f32 {
-    let ph = u.time / FLOW_T;
+    let ph = u.time / GRAIN_PERIOD;
     let f1 = fract(ph);
     let f2 = fract(ph + 0.5);
-    let n1 = grain(gp - v * (f1 * FLOW_T) + hash22(vec2f(floor(ph), seed)) * 211.0, cell, fpx);
-    let n2 = grain(gp - v * (f2 * FLOW_T) + hash22(vec2f(floor(ph + 0.5), seed + 3.0)) * 211.0, cell, fpx);
+    let n1 = grain(gp - v * (f1 * GRAIN_PERIOD) + hash22(vec2f(floor(ph), seed)) * 211.0, cell, fpx);
+    let n2 = grain(gp - v * (f2 * GRAIN_PERIOD) + hash22(vec2f(floor(ph + 0.5), seed + 3.0)) * 211.0, cell, fpx);
     let w = 1.0 - abs(2.0 * f1 - 1.0);
     return (w * n1 + (1.0 - w) * n2) * inverseSqrt(w * w + (1.0 - w) * (1.0 - w));
 }
@@ -80,7 +80,7 @@ fn lilac(t: f32) -> vec3f {
 // Cross-section of a band lit from one edge: tone and speckle density at distance dl from the
 // lit edge and ds from the shadowed one (ref px), for a band w wide. Thin bands are a pale stripe
 // over a speckled body; fat ones are airbrushed tubes whose shadow side dissolves into speckle.
-fn profile(dl: f32, ds: f32, w: f32) -> vec2f {
+fn band_profile(dl: f32, ds: f32, w: f32) -> vec2f {
     let fat = smoothstep(7.0, 18.0, w);
     let pw = 0.36 * w + 0.12 * max(w - 8.0, 0.0);
     var t = mix(0.92 + P(P_BAND_EDGE_TONE), 0.44 + P(P_BAND_BODY_TONE), smoothstep(pw - 0.5, pw + 0.6 + 0.1 * w, dl));
@@ -97,53 +97,53 @@ fn profile(dl: f32, ds: f32, w: f32) -> vec2f {
 
 // Coverage of one stripe band on the near side at c, with the cross-section shading.
 struct Band {
-    cov: f32,
+    coverage: f32,
     tone: f32,
-    dens: f32,
+    density: f32,
 }
 
 fn band_at(c: f32, gl: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
     var o: Band;
     let k = floor(c);
     let f = c - k;
-    let duty = DUTY + (0.05 + P(P_BAND_WIDTH_JITTER)) * (vnoise(vec2f(m * 0.35, k * 3.7)) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
+    let duty = DUTY + (0.05 + P(P_BAND_WIDTH_JITTER)) * (value_noise(vec2f(m * 0.35, k * 3.7)) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
     let lo = 1.0 - duty;
     let w = duty / gl;
     // distances (ref px) to the band's low and high edges; negative outside the band
     let a_lo = (f - lo) / gl;
     let a_hi = select((1.0 - f) / gl, -f / gl, f < lo);
     let dd = select(min(a_lo, a_hi), -min(lo - f, f) / gl, f < lo);
-    o.cov = clamp((dd + rough) * px + 0.5, 0.0, 1.0);
+    o.coverage = clamp((dd + rough) * px + 0.5, 0.0, 1.0);
     // the high edge faces +grad c; light it when that faces the light
     let e = clamp(dot(gh, LIGHT) / 0.35, -1.0, 1.0);
-    let lit_hi = profile(max(a_hi, 0.0), max(a_lo, 0.0), w);
-    let lit_lo = profile(max(a_lo, 0.0), max(a_hi, 0.0), w);
+    let lit_hi = band_profile(max(a_hi, 0.0), max(a_lo, 0.0), w);
+    let lit_lo = band_profile(max(a_lo, 0.0), max(a_hi, 0.0), w);
     let pr = mix(lit_lo, lit_hi, 0.5 + 0.5 * e);
     o.tone = pr.x;
-    o.dens = pr.y;
+    o.density = pr.y;
     return o;
 }
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let vsize = u.view.zw - u.view.xy;
-    let cover = cover_of(pos.xy);
+    let cover = pos_to_cover(pos.xy);
     let opx = u.resolution.x / vsize.x;   // output pixels per cover unit
     let px = opx / REFPX;                 // output pixels per reference pixel
     let fpx = 1.0 / px;
-    let fo = u.fscale;
-    let fv = fl(pos.xy);
-    let fxp = fl(pos.xy + vec2f(fo, 0.0));
-    let fxm = fl(pos.xy - vec2f(fo, 0.0));
-    let fyp = fl(pos.xy + vec2f(0.0, fo));
-    let fym = fl(pos.xy - vec2f(0.0, fo));
+    let fo = u.field_scale;
+    let fv = sample_field(pos.xy);
+    let fxp = sample_field(pos.xy + vec2f(fo, 0.0));
+    let fxm = sample_field(pos.xy - vec2f(fo, 0.0));
+    let fyp = sample_field(pos.xy + vec2f(0.0, fo));
+    let fym = sample_field(pos.xy - vec2f(0.0, fo));
     let c = fv.r;
     let m = fv.g;
     let vflow = fv.ba;
     let scn = scene();
-    let rel = plane_q(scn.cam, cover) - scn.qb;
-    let s_down = rel.x / scn.a;
-    let rr = length(rel) / scn.a;
+    let rel = cover_to_plane(scn.cam, cover) - scn.centre;
+    let s_down = rel.x / scn.radius;
+    let rr = length(rel) / scn.radius;
     let gs = vec2f(fxp.r - fxm.r, fyp.r - fym.r) * (0.5 / fo) * px;
     let gl = max(length(gs), 1e-5);
     let gh = gs / gl;
@@ -155,35 +155,35 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let speck = 0.85 * gfine + 0.35 * gclump;
     let rough = 0.12 * gfine;
 
-    let black = srgb(14.0, 11.0, 15.0) * (1.0 + 0.25 * gfine);
+    let black = rgb255(14.0, 11.0, 15.0) * (1.0 + 0.25 * gfine);
     var col = black;
 
     if (c < 0.0) {
         // flat coloured stream
-        let red = srgb(232.0, 38.0, 56.0);
-        let pink = srgb(240.0, 84.0, 140.0);
-        let amber = srgb(236.0, 166.0, 46.0);
-        let orange = srgb(240.0, 100.0, 40.0);
+        let red = rgb255(232.0, 38.0, 56.0);
+        let pink = rgb255(240.0, 84.0, 140.0);
+        let amber = rgb255(236.0, 166.0, 46.0);
+        let orange = rgb255(240.0, 100.0, 40.0);
         var sc = mix(red, pink, smoothstep(4.5, 1.3, rr) * (1.0 - smoothstep(1.2, 2.4, s_down)));
         sc = mix(sc, orange, smoothstep(2.6, 3.6, s_down));
         sc = mix(sc, amber, smoothstep(3.4, 4.6, s_down));
         sc *= 1.0 + 0.035 * speck;
         // bands beside the stream stand proud of it and shade it on the side away from the light
         let ls = pos.xy + LIGHT * (2.2 * px);
-        let lc = fl(ls).r;
+        let lc = sample_field(ls).r;
         let shade_by = clamp(lc / gl * px + 0.5, 0.0, 1.0);
         sc *= 1.0 - 0.4 * shade_by;
         let cov = clamp((-c / gl + rough) * px + 0.5, 0.0, 1.0);
         col = mix(black, sc, cov);
     } else {
         let b = band_at(c, gl, gh, m, px, rough);
-        if (b.cov > 0.0) {
+        if (b.coverage > 0.0) {
             // speckle where the grain beats the local density; soft edges when minified
-            let thr = (0.5 - b.dens) * 2.6;
+            let thr = (0.5 - b.density) * 2.6;
             let aa = 0.3 + 0.6 * smoothstep(0.5, 2.0, fpx);
-            let dots = smoothstep(thr - aa, thr + aa, speck) * smoothstep(0.0, 0.08, b.dens);
+            let dots = smoothstep(thr - aa, thr + aa, speck) * smoothstep(0.0, 0.08, b.density);
             var t = b.tone + 0.05 * gclump * smoothstep(0.85, 0.6, b.tone) + 0.03 * gfine - 0.44 * dots;
-            col = mix(black, lilac(t), b.cov);
+            col = mix(black, lilac(t), b.coverage);
         }
         // stripes too fine for the pixels settle to their average instead of beating
         let per_px = px / gl;
@@ -219,8 +219,8 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let mq = vec2f(m, c);
         let vis1 = smoothstep(1.0, 3.0, cpp / 2.6);
         let vis2 = smoothstep(1.0, 3.0, cpp / 5.7);
-        let big = noised(mq * 0.13 + 2.0).x * 3.0 + noised(mq * 0.45 - 7.0).x * 1.5;
-        let sp = (noised(mq * 2.6 + 11.0).x * vis1 + 0.7 * noised(mq * 5.7 - 3.0).x * vis2) * 3.4 + 0.5 * gfine;
+        let big = gradient_noise(mq * 0.13 + 2.0).x * 3.0 + gradient_noise(mq * 0.45 - 7.0).x * 1.5;
+        let sp = (gradient_noise(mq * 2.6 + 11.0).x * vis1 + 0.7 * gradient_noise(mq * 5.7 - 3.0).x * vis2) * 3.4 + 0.5 * gfine;
         let fe = fd + (0.055 + P(P_SPRAY_MOTTLE)) * big;
         let painted = smoothstep(0.0, 0.62, fe);
         let thr = (0.5 - painted) * 2.4;
@@ -230,7 +230,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let lum = dot(col, vec3f(0.3, 0.6, 0.1));
         let tint = 1.0 - smoothstep(0.2, 0.62, fe);
         let lines = mix(col, vec3f(0.8, 0.58, 1.12) * lum * 1.15, 0.75 * tint);
-        let tone = srgb(116.0, 86.0, 160.0) * clamp(0.72 + 0.16 * sp, 0.4, 1.15);
+        let tone = rgb255(116.0, 86.0, 160.0) * clamp(0.72 + 0.16 * sp, 0.4, 1.15);
         let pc = mix(tone, lines, smoothstep(0.22, 0.6, fe));
         // a dim haze of the finest droplets between the blobs
         col = mix(mix(black, tone * 0.5, 0.35 * painted * (1.0 - painted)), pc, paint);
@@ -286,7 +286,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
         // the liquid mirrored in the chrome. The surface is not perfect: a slow waviness bends
         // the image and its roughness blurs it, more toward the rim.
-        let wob = vec2f(noised(d2 * 3.1 + 4.0).x, noised(d2 * 3.1 - 9.0).x);
+        let wob = vec2f(gradient_noise(d2 * 3.1 + 4.0).x, gradient_noise(d2 * 3.1 - 9.0).x);
         let bn = normalize(vec3f(d2 + 0.05 * wob, -bz));
         let bp = c3 + s0 * r3;
         let rdir = reflect(normalize(bp), bn);
@@ -297,25 +297,25 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let rt = (scn.cam.d - dot(scn.cam.n, bpl)) / rden;
         let rh = bpl + rdir * rt;
         let rcov = rh.xy / max(rh.z, 1e-3) * FOCAL + 0.5;
-        let rpos = pos_of(rcov);
+        let rpos = cover_to_pos(rcov);
         let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * (4.0 + P(P_REFLECTION_BLUR) + 4.0 * pow(1.0 - bz, 2.0)) + 1.5 * fo;
         var refl = vec3f(0.0);
         if (rt > 0.0 && rh.z > 0.0 && rd2 < 1.0) {
             var rc = 0.0;
             var rg = 0.05 * rfoot;
             if (all(rpos >= vec2f(fo)) && all(rpos < u.resolution - fo)) {
-                rc = fl(rpos).r;
-                rg = rfoot * (0.5 / fo) * length(vec2f(fl(rpos + vec2f(fo, 0.0)).r - fl(rpos - vec2f(fo, 0.0)).r,
-                                                       fl(rpos + vec2f(0.0, fo)).r - fl(rpos - vec2f(0.0, fo)).r));
+                rc = sample_field(rpos).r;
+                rg = rfoot * (0.5 / fo) * length(vec2f(sample_field(rpos + vec2f(fo, 0.0)).r - sample_field(rpos - vec2f(fo, 0.0)).r,
+                                                       sample_field(rpos + vec2f(0.0, fo)).r - sample_field(rpos - vec2f(0.0, fo)).r));
             } else {
                 // off screen: undisturbed lines
-                let q = vec2f(dot(rh, scn.cam.eu), dot(rh, scn.cam.ev)) - scn.qb;
-                rc = abs(q.y * (1.0 - min(scn.a * scn.a / max(dot(q, q), 1e-4), 1.0))) - 0.8;
+                let q = vec2f(dot(rh, scn.cam.eu), dot(rh, scn.cam.ev)) - scn.centre;
+                rc = abs(q.y * (1.0 - min(scn.radius * scn.radius / max(dot(q, q), 1e-4), 1.0))) - 0.8;
             }
             let rf = fract(rc);
             let rband = clamp(min(rf - (1.0 - DUTY), 1.0 - rf) / max(rg, 1e-3) + 0.5, 0.0, 1.0);
             let rline = mix(rband, DUTY, smoothstep(0.3, 0.8, rg));
-            refl = mix(srgb(232.0, 60.0, 96.0), srgb(168.0, 137.0, 182.0) * rline, clamp(rc / max(rg, 1e-3) + 0.5, 0.0, 1.0));
+            refl = mix(rgb255(232.0, 60.0, 96.0), rgb255(168.0, 137.0, 182.0) * rline, clamp(rc / max(rg, 1e-3) + 0.5, 0.0, 1.0));
         }
         // the lower half faces the liquid and mirrors its moving lines, strongest at grazing angles
         let rk = smoothstep(0.08, 0.6, rden) * (0.16 + P(P_BALL_REFLECTION) + 0.34 * pow(1.0 - bz, 2.0)) * (1.0 + 0.15 * gc);
@@ -326,14 +326,14 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let nd = dot(scn.cam.n, bn);
         if (nd > 0.02) {
             let bh = bpl + bn * ((scn.cam.d - dot(scn.cam.n, bpl)) / nd);
-            let bpos = pos_of(bh.xy / max(bh.z, 1e-3) * FOCAL + 0.5);
+            let bpos = cover_to_pos(bh.xy / max(bh.z, 1e-3) * FOCAL + 0.5);
             let spread = 0.3 * BALL_R * opx;
             let band_avg = mix(black, lilac(0.55), DUTY);
             var acc = vec3f(0.0);
             for (var k = 0; k < 5; k++) {
                 let o = select(vec2f(f32(k & 1) * 2.0 - 1.0, f32(k >> 1u & 1) * 2.0 - 1.0), vec2f(0.0), k == 4);
-                let cc = fl(clamp(bpos + o * spread, vec2f(fo), u.resolution - fo)).r;
-                acc += mix(srgb(236.0, 56.0, 80.0), band_avg, smoothstep(-0.3, 0.3, cc));
+                let cc = sample_field(clamp(bpos + o * spread, vec2f(fo), u.resolution - fo)).r;
+                acc += mix(rgb255(236.0, 56.0, 80.0), band_avg, smoothstep(-0.3, 0.3, cc));
             }
             scol2 += acc * (0.2 * (0.22 + P(P_BOUNCE_TINT))) * smoothstep(0.02, 0.5, nd) * (1.0 - 0.6 * g);
         }
@@ -351,22 +351,22 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);
         if (P(P_DEBUG_BALL_OUTLINE) > 0.5) { cov *= 0.35; }
         col = mix(col, scol2, cov);
-        let ride = smoothstep(-0.3, 0.5, noised(vec2f(m * 0.8, 3.3)).x * 1.6 + 0.5 * noised(vec2f(m * 2.6, 9.1)).x);
+        let ride = smoothstep(-0.3, 0.5, gradient_noise(vec2f(m * 0.8, 3.3)).x * 1.6 + 0.5 * gradient_noise(vec2f(m * 2.6, 9.1)).x);
         let facing = 0.3 + 0.7 * smoothstep(-0.5, 0.6, dot(-gh, LIGHT));
         let crest = exp(-pow((wl - 1.3) / 0.75, 2.0));
         let sheen = exp(-pow((wl - 2.8) / 1.6, 2.0));
         let lip = side * (1.0 - cov) * facing;
-        col = mix(col, srgb(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
-        col += srgb(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
+        col = mix(col, rgb255(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
+        col += rgb255(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
         if (P(P_DEBUG_BALL_OUTLINE) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
     }
 
     // glare round the two highlights, breathing a little as if light came through moving water
-    let fl1 = 1.0 + 0.1 * noised(vec2f(u.time * 0.9, 1.7)).x * 2.0;
+    let fl1 = 1.0 + 0.1 * gradient_noise(vec2f(u.time * 0.9, 1.7)).x * 2.0;
     let h1 = length(cover - (BALL_C + BALL_R * vec2f(-0.43, -0.45))) / BALL_R;
     let h2 = length(cover - (BALL_C + BALL_R * vec2f(0.045, -0.57))) / BALL_R;
     let glow = (0.3 * exp(-pow(h1 / 0.42, 2.0)) + 0.07 * exp(-h1 / 0.45)
               + 0.22 * exp(-pow(h2 / 0.2, 2.0)) + 0.04 * exp(-h2 / 0.3)) * fl1 * (1.0 + P(P_GLARE_GAIN));
-    col = 1.0 - (1.0 - col) * (1.0 - glow * srgb(255.0, 236.0, 250.0));
+    col = 1.0 - (1.0 - col) * (1.0 - glow * rgb255(255.0, 236.0, 250.0));
     return vec4f(col, 1.0);
 }
