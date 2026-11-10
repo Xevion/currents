@@ -2,12 +2,14 @@ mod debug;
 mod key;
 mod noise;
 mod pass;
+mod resolve;
 mod timing;
 
 pub use debug::{FieldView, UnknownView};
 use key::{Key, Keys};
 pub(crate) use pass::draw_fullscreen;
 use pass::{Inputs, Pass, SHARED_BINDINGS};
+use resolve::{History, Resolve};
 pub use timing::PassTimes;
 use timing::Timing;
 
@@ -31,6 +33,13 @@ pub struct Uniforms {
     key_time: f32,
     key_size: [f32; 2],
     key_view: [f32; 4],
+    /// What blending with the frame before needs, filled in by the renderer: that frame's
+    /// view, this frame's shift within the pixel, the time between them, and how many frames
+    /// have been blended so far (0 when there is none to build on).
+    prev_view: [f32; 4],
+    jitter: [f32; 2],
+    elapsed: f32,
+    history: f32,
     params: ParamBlock,
 }
 
@@ -59,8 +68,19 @@ impl Uniforms {
             key_time: 0.0,
             key_size: [0.0; 2],
             key_view: [0.0; 4],
+            prev_view: [0.0; 4],
+            jitter: [0.0; 2],
+            elapsed: 0.0,
+            history: 0.0,
             params,
         }
+    }
+
+    /// Whether `before` is a frame this one can be blended with: the same picture size and
+    /// tuning, a little earlier. The view may have moved.
+    fn follows(&self, before: &Self) -> bool {
+        let shape = |u: &Self| Self { time: 0.0, view: [0.0; 4], ..*u };
+        shape(self) == shape(before) && (0.0..MAX_BLEND_GAP).contains(&(self.time - before.time))
     }
 
     /// Whether `other` shows the same picture at some other time.
@@ -87,6 +107,10 @@ impl Uniforms {
             key_time: 0.0,
             key_size: [0.0; 2],
             key_view: [0.0; 4],
+            prev_view: [0.0; 4],
+            jitter: [0.0; 2],
+            elapsed: 0.0,
+            history: 0.0,
             params: self.params,
         };
         from.map_or(own, |from| own.with_key(from))
@@ -99,6 +123,11 @@ pub(crate) const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32
 const HOP_STEP: u32 = 4;
 const HOP_CONSTANTS: [(&str, f64); 1] = [("hop_step", HOP_STEP as f64)];
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Longest stretch of flow between two frames that are still blended; past it the liquid has
+/// moved too far for the earlier frame to say anything about this one.
+const MAX_BLEND_GAP: f32 = 0.25;
+/// Past this many frames a blend has settled, and the count stops mattering.
+const MAX_BLENDED: u32 = 64;
 
 /// Shade resolution in pixels and the supersampling factor; the field texture is derived from both.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,6 +145,7 @@ struct Targets {
     color: wgpu::Texture,
     color_view: wgpu::TextureView,
     shade_bind: wgpu::BindGroup,
+    history: History,
 }
 
 /// A texture keys are rendered into.
@@ -164,6 +194,13 @@ pub struct Renderer {
     /// One pipeline per `FieldView`, in its order, bound like the shade pass.
     debug: Vec<wgpu::RenderPipeline>,
     targets: Option<Targets>,
+    resolve: Resolve,
+    /// Whether frames are blended with the ones before them.
+    temporal: bool,
+    /// Frames blended so far without a break, the last of which the next can build on.
+    blended: u32,
+    /// Frames drawn while blending, which picks each one's shading points.
+    frame: u32,
     sampler: wgpu::Sampler,
     timing: Option<Timing>,
 }
@@ -302,6 +339,10 @@ impl Renderer {
             shade,
             debug,
             targets: None,
+            resolve: Resolve::new(device, sources),
+            temporal: true,
+            blended: 0,
+            frame: 0,
             sampler,
             timing: Timing::new(device, queue),
         }
@@ -387,8 +428,21 @@ impl Renderer {
                 },
             ],
         });
-        self.targets = Some(Targets { size, hop_view, field_view, color, color_view, shade_bind });
+        let history = self.resolve.history(device, &self.ubuf, &field_view, width, height);
+        self.blended = 0;
+        self.targets = Some(Targets { size, hop_view, field_view, color, color_view, shade_bind, history });
         true
+    }
+
+    /// Turns blending each frame with the ones before it on or off. It stands in for
+    /// supersampling at the cost of one cheap pass, and is on to begin with.
+    pub fn set_temporal(&mut self, temporal: bool) {
+        self.temporal = temporal;
+        self.blended = 0;
+    }
+
+    pub const fn temporal(&self) -> bool {
+        self.temporal
     }
 
     /// Bindings that read each key texture, with the hop map the current targets hold.
@@ -439,16 +493,33 @@ impl Renderer {
             field_scale: uniforms.field_scale.max(1.0) as u32,
         };
         let rebuilt = self.ensure_targets(device, size);
+        let before = self.last;
         let field_texels = [size.width.div_ceil(size.field_scale), size.height.div_ceil(size.field_scale)];
         let slice = self.update_keys(device, uniforms, field_texels);
         let held = self.keys.held();
-        let frame = held.map_or(*uniforms, |(_, key)| uniforms.with_key(&key));
+        let mut frame = held.map_or(*uniforms, |(_, key)| uniforms.with_key(&key));
+        let blend = self.temporal && view.is_none();
+        let built_on = before.filter(|before| blend && self.blended > 0 && uniforms.follows(before));
+        if let Some(before) = built_on {
+            frame.prev_view = before.view;
+            frame.elapsed = uniforms.time - before.time;
+            frame.history = self.blended.min(MAX_BLENDED) as f32;
+            frame.jitter = resolve::jitter(self.frame);
+            self.frame = self.frame.wrapping_add(1);
+        }
+        self.blended = if !blend {
+            0
+        } else if built_on.is_some() {
+            self.blended.saturating_add(1)
+        } else {
+            1
+        };
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&frame));
         if self.key_binds.is_none() {
             let hop_view = &self.targets.as_ref().expect("ensure_targets left the targets unset").hop_view;
             self.key_binds = Some(self.key_binds(device, hop_view));
         }
-        let t = self.targets.as_ref().expect("ensure_targets left the targets unset");
+        let t = self.targets.as_mut().expect("ensure_targets left the targets unset");
         let key_binds = self.key_binds.as_ref().expect("key bindings were made just above");
         let stamps = |pass, first, last| self.timing.as_ref().map(|tm| tm.pass_writes(pass, first, last));
         let keyed = slice.is_some();
@@ -469,7 +540,12 @@ impl Renderer {
         let field = if self.rough { &self.field_rough } else { &self.field.pipeline };
         draw_fullscreen(enc, &t.field_view, field, field_bind, stamps(0, !keyed && held.is_none(), true));
         let colour = view.map_or(&self.shade.pipeline, |v| &self.debug[v as usize]);
-        draw_fullscreen(enc, &t.color_view, colour, &t.shade_bind, stamps(1, true, true));
+        if blend {
+            draw_fullscreen(enc, &t.history.shaded, colour, &t.shade_bind, stamps(1, true, false));
+            self.resolve.draw(enc, &mut t.history, &t.color_view, stamps(1, false, true));
+        } else {
+            draw_fullscreen(enc, &t.color_view, colour, &t.shade_bind, stamps(1, true, true));
+        }
         if let Some(tm) = self.timing.as_mut() {
             tm.resolve(enc);
         }
@@ -512,6 +588,13 @@ mod tests {
         let source = shade_source(&Sources::embedded(), filterable);
         validate("shade", &source);
         to_webgl("shade", &source, &[]);
+    }
+
+    #[test]
+    fn resolve_shader_validates_and_translates_for_webgl() {
+        let source = resolve::source(&Sources::embedded());
+        validate("resolve", &source);
+        to_webgl("resolve", &source, &[]);
     }
 
     #[test]

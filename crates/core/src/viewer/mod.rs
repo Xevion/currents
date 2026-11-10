@@ -56,6 +56,9 @@ pub struct Settings {
     pub speed: f32,
     /// Supersampling factor per axis, at least 1.
     pub supersampling: u32,
+    /// Whether each frame is blended with the ones before it, which smooths what one sample
+    /// a pixel leaves rough; T switches it.
+    pub temporal: bool,
     /// Output pixels per flow field texel, at least 1; an adaptive budget may coarsen it.
     pub field_step: u32,
     pub params: ParamBlock,
@@ -251,6 +254,11 @@ impl ApplicationHandler<Started> for App {
                     Key::Named(NamedKey::Escape) if cfg!(not(target_arch = "wasm32")) => el.exit(),
                     Key::Character("r") => self.camera.reset(),
                     Key::Character("d") => self.view = FieldView::cycle(self.view),
+                    Key::Character("t") => {
+                        if let Some(g) = self.gfx.as_mut() {
+                            g.toggle_temporal();
+                        }
+                    },
                     _ => {},
                 }
             },

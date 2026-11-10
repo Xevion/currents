@@ -52,7 +52,8 @@ impl Gfx {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let blit = Blit::new(&device, config.format, settings.supersampling);
-        let renderer = Renderer::new(&device, &queue, &settings.sources);
+        let mut renderer = Renderer::new(&device, &queue, &settings.sources);
+        renderer.set_temporal(settings.temporal);
         let internal = internal.pop().await;
         if let Some(error) = internal.or(validation.pop().await) {
             return PipelinesSnafu { message: error.to_string() }.fail();
@@ -101,6 +102,14 @@ impl Gfx {
                 "render scale"
             );
         }
+    }
+
+    /// Switches blending frames with the ones before them, and redraws even a paused picture.
+    pub(crate) fn toggle_temporal(&mut self) {
+        let temporal = !self.renderer.temporal();
+        self.renderer.set_temporal(temporal);
+        self.drawn = None;
+        info!(temporal, "temporal antialiasing");
     }
 
     /// The next surface texture, or `None` when this frame is skipped; a stale surface is reconfigured first.

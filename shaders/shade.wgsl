@@ -188,9 +188,10 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     let opx = u.resolution.x / vsize.x;   // output pixels per cover unit
     let px = opx / REFPX;                 // output pixels per reference pixel
     let fpx = 1.0 / px;
-    // an edge ramps over one pixel where supersampling softens it further, and a little
-    // more where the pixel shaded is the pixel shown
-    let edge = px / max(1.0, 1.4 / u.supersampling);
+    // an edge ramps over a pixel and a half where the pixel shaded is the pixel shown. Where
+    // more softens it after (supersampling, or the blend of frames shaded at shifted points)
+    // it ramps over less, so that the two together come to about the same
+    let edge = px / select(max(1.0, 1.4 / u.supersampling), 0.7, u.history > 0.5);
     let fo = u.field_scale;
     let fv = sample_field(pos.xy);
     let fxp = sample_field(pos.xy + vec2f(fo, 0.0));
@@ -583,8 +584,9 @@ fn add_bounced_light(scol2_in: vec3f, g: f32, pix: Pixel, scn: Scene, mir: Mirro
 
 // Lays the ball over the liquid. Bands on the camera side lap over it, and along the
 // waterline the liquid climbs the ball in a rolled lip that catches the light, with glints
-// carried along it by the flow; the ball just above sits in its shade.
-fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec3f {
+// carried along it by the flow; the ball just above sits in its shade. Returns the colour and,
+// in w, how much of the pixel shows the ball itself.
+fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec4f {
     let px = pix.out_px_per_ref;
     let c = pix.line;
     let m = pix.flow_label;
@@ -617,12 +619,13 @@ fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec
         col += rgb255(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
     }
     if (P(P_DEBUG_BALL_OUTLINE) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
-    return col;
+    return vec4f(col, cov);
 }
 
-// The ball: painted tone fitted to the cover, with the liquid mirrored in it and lapping over it.
-fn paint_ball(col_in: vec3f, pix: Pixel, scn: Scene, ball: Ball) -> vec3f {
-    var col = col_in;
+// The ball: painted tone fitted to the cover, with the liquid mirrored in it and lapping over
+// it. Returns the colour and, in w, how much of the pixel shows the ball itself.
+fn paint_ball(col_in: vec3f, pix: Pixel, scn: Scene, ball: Ball) -> vec4f {
+    var col = vec4f(col_in, 0.0);
     if (ball.disc_r < 1.02) {
         let surf = ball_surface(pix, scn, ball);
         let bz = surf.height;
@@ -636,7 +639,7 @@ fn paint_ball(col_in: vec3f, pix: Pixel, scn: Scene, ball: Ball) -> vec3f {
         let rk = smoothstep(0.08, 0.6, rden) * (0.16 + P(P_BALL_REFLECTION) + 0.34 * pow(1.0 - bz, 2.0)) * (1.0 + 0.15 * gc);
         var scol2 = mix(scol, refl * 1.1 + scol * 0.25, rk);
         scol2 = add_bounced_light(scol2, g, pix, scn, mir);
-        col = composite_ball(col, scol2, pix, ball);
+        col = composite_ball(col.rgb, scol2, pix, ball);
     }
     return col;
 }
@@ -654,7 +657,9 @@ fn glare(col_in: vec3f, cover: vec2f) -> vec3f {
 @fragment
 fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let scn = scene();
-    let pix = pixel_state(pos.xy, scn);
+    // each frame shades points a fraction of a pixel off the last one's, so that frames
+    // blended together cover the pixel
+    let pix = pixel_state(pos.xy + u.jitter, scn);
     let ball = ball_geometry(pix.cover, scn);
 
     var col: vec3f;
@@ -665,7 +670,8 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
     col *= ball_shadow(pix, scn, ball);
     col = spray_fade(col, pix);
-    col = paint_ball(col, pix, scn, ball);
-    col = glare(col, pix.cover);
-    return vec4f(col, 1.0);
+    let painted = paint_ball(col, pix, scn, ball);
+    col = glare(painted.rgb, pix.cover);
+    // alpha tells the blend of frames which pixels stay put with the ball
+    return vec4f(col, painted.w);
 }

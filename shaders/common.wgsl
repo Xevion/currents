@@ -7,6 +7,10 @@ struct Uniforms {
     key_time: f32,          // time of the key the field pass reads
     key_size: vec2f,        // texels across the key; zero when none is held
     key_view: vec4f,        // part of the cover the key spans
+    prev_view: vec4f,       // the view of the frame before
+    jitter: vec2f,          // shift of this frame's shading points, in shade pixels
+    elapsed: f32,           // time since the frame before
+    history: f32,           // frames blended so far that this one builds on
     params: array<vec4f, 8>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;

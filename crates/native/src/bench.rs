@@ -88,8 +88,16 @@ const STAGES: &[Stage] = &[
     },
     Stage { pass: PassKind::Shade, name: "ball shadow", edits: &[("col *= ball_shadow(pix, scn, ball);", "")] },
     Stage { pass: PassKind::Shade, name: "spray fade", edits: &[("col = spray_fade(col, pix);", "")] },
-    Stage { pass: PassKind::Shade, name: "ball", edits: &[("col = paint_ball(col, pix, scn, ball);", "")] },
-    Stage { pass: PassKind::Shade, name: "glare", edits: &[("col = glare(col, pix.cover);", "")] },
+    Stage {
+        pass: PassKind::Shade,
+        name: "ball",
+        edits: &[("let painted = paint_ball(col, pix, scn, ball);", "let painted = vec4f(col, 0.0);")],
+    },
+    Stage {
+        pass: PassKind::Shade,
+        name: "glare",
+        edits: &[("col = glare(painted.rgb, pix.cover);", "col = painted.rgb;")],
+    },
 ];
 
 impl Stage {
@@ -151,7 +159,8 @@ impl Bench<'_> {
     /// A renderer for `sources`, or the reason its shaders did not compile.
     fn renderer(&self, sources: &Sources) -> Result<Renderer, String> {
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let renderer = Renderer::new(&self.device, &self.queue, sources);
+        let mut renderer = Renderer::new(&self.device, &self.queue, sources);
+        renderer.set_temporal(self.common.temporal());
         pollster::block_on(scope.pop()).map_or(Ok(renderer), |error| Err(error.to_string()))
     }
 

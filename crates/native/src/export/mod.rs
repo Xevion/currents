@@ -108,6 +108,7 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     let instance = wgpu::Instance::default();
     let Gpu { device, queue, .. } = pollster::block_on(gpu::request(&instance, None)).context(GpuSnafu)?;
     let mut renderer = Renderer::new(&device, &queue, &sources);
+    renderer.set_temporal(common.temporal());
     let readback = Readback::new(&device, shaded);
     let reference = args.reference.then(|| Reference::open(Path::new(COVER))).transpose()?;
     let sink = target.sink(args.fps, encoding);

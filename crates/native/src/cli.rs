@@ -3,7 +3,7 @@ mod size;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 pub(crate) use currents_core::View;
 use currents_core::renderer::FieldView;
 use currents_core::shaders::{self, Sources};
@@ -15,13 +15,22 @@ use crate::export::encode::Format;
 
 /// Live rendering of the Currents cover. With no subcommand, opens the interactive viewer
 /// (scroll to zoom at the cursor, drag to pan, space to pause, R to reset, D to cycle the
-/// field debug views, Esc to quit).
+/// field debug views, T to switch temporal antialiasing, Esc to quit).
 #[derive(Parser)]
 pub(crate) struct Cli {
     #[command(flatten)]
     pub(crate) common: Common,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+/// How detail finer than a pixel is kept from flickering as it moves.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Antialias {
+    /// Each frame stands alone
+    Off,
+    /// Each frame is blended with the ones before it, following the liquid
+    Temporal,
 }
 
 #[derive(Args, Clone)]
@@ -35,6 +44,9 @@ pub(crate) struct Common {
     /// Supersampling factor per axis
     #[arg(long, default_value_t = 1, global = true)]
     pub(crate) ss: u32,
+    /// Antialiasing across frames
+    #[arg(long, value_enum, default_value_t = Antialias::Temporal, global = true)]
+    pub(crate) aa: Antialias,
     /// Output pixels per flow field texel; above 1 trades the stream's thinnest filaments for speed
     #[arg(long, default_value_t = 1, global = true)]
     pub(crate) field_step: u32,
@@ -57,6 +69,11 @@ impl Common {
         self.ss.max(1)
     }
 
+    /// Whether frames are blended with the ones before them.
+    pub(crate) fn temporal(&self) -> bool {
+        self.aa == Antialias::Temporal
+    }
+
     pub(crate) fn sources(&self) -> Result<Sources, shaders::Error> {
         Sources::from_dir(&self.shaders)
     }
@@ -67,6 +84,7 @@ impl Common {
             sources: self.sources()?,
             speed: self.speed,
             supersampling: self.supersampling(),
+            temporal: self.temporal(),
             field_step: self.field_step,
             params: self.param_array(),
             budget: None,
