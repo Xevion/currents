@@ -5,7 +5,8 @@ const EDDY_RISE_END = 6.0;
 const EDDY_FADE_START = 12.0;
 const EDDY_FADE_END = 26.0;
 
-const MAX_TRACE_DT = 0.25;      // longest trace step, seconds
+// Trace step in seconds, longer only when a trace would take more than MAX_TRACE_STEPS.
+const MAX_TRACE_DT = 0.25;
 const MAX_TRACE_STEPS = 64;
 const FLOW_SPEED = 4.0;   // periods per second
 
@@ -58,17 +59,25 @@ fn wake_peak_deficit(y: vec2f, scn: Scene) -> vec3f {
     return dm * vec3f(ax.x * bn.x, vec2f(ax.y * bn.x, 0.0) + ax.x * bn.y * scn.down);
 }
 
+// Cross-stream profile of the wake stream function, s tanh(y/s) faded out a few wake widths
+// to the side so the deficit's ramps do not push the liquid sideways across the whole picture.
+// Returns the profile and its slope.
+fn wake_profile(yy: f32) -> vec2f {
+    let s = 10.0 + P(P_WAKE_WIDTH);
+    let w = 3.0 * s;
+    let th = tanh(yy / s);
+    let fade = exp(-(yy * yy) / (w * w));
+    return vec2f(s * th * fade, ((1.0 - th * th) - s * th * 2.0 * yy / (w * w)) * fade);
+}
+
 fn wake_deficit(y: vec2f, scn: Scene) -> f32 {
-    let ch = 1.0 / cosh(y.y / (10.0 + P(P_WAKE_WIDTH)));
-    return wake_peak_deficit(y, scn).x * ch * ch;
+    return wake_peak_deficit(y, scn).x * wake_profile(y.y).y;
 }
 
 fn wake_velocity(y: vec2f, scn: Scene) -> vec2f {
-    let s = 10.0 + P(P_WAKE_WIDTH);
     let d = wake_peak_deficit(y, scn);
-    let th = tanh(y.y / s);
-    let ig = s * th;
-    return -FLOW_SPEED * vec2f(d.z * ig + d.x * (1.0 - th * th), -d.y * ig);
+    let g = wake_profile(y.y);
+    return -FLOW_SPEED * vec2f(d.z * g.x + d.x * g.y, -d.y * g.x);
 }
 
 // Velocity at lab position y (relative to the ball): potential flow round the disc plus the
