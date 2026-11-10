@@ -147,7 +147,6 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let r2 = max(dot(src, src), 1e-6);
     let psi = src.y * (1.0 - min(a * a / r2, 1.0));
     let rr = length(rel);
-    let s_down = rel.x;
     // the stream flares into a pool around the obstacle and widens a little downstream
     let pool = (0.7 + P(P_POOL_FLARE)) * smoothstep(a * 1.8, a * 1.0, rr) * smoothstep(0.9, -0.3, dot(rel, scn.down) / a);
     let hw = 0.8 + P(P_STREAM_HALF_WIDTH) + pool;

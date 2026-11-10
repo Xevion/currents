@@ -124,8 +124,30 @@ fn band_at(c: f32, gl: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
     return o;
 }
 
-@fragment
-fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+// Per-pixel values shared by every stage.
+struct Pixel {
+    pos: vec2f,            // output pixel position
+    cover: vec2f,          // position on the cover
+    out_px_per_cover: f32,
+    out_px_per_ref: f32,
+    ref_px_per_out: f32,
+    field_step: f32,       // field texel step, in output pixels
+    line: f32,             // stripe line coordinate in periods, negative inside the stream
+    flow_label: f32,       // label that rides with the fluid along each band
+    line_grad_len: f32,    // length of the line coordinate gradient
+    line_grad_dir: vec2f,  // direction of that gradient
+    plane_rel: vec2f,      // plane position relative to the obstacle centre
+    obstacle_dist: f32,    // distance from the obstacle centre, in obstacle radii
+    obstacle_down: f32,    // downstream distance from the obstacle centre, in obstacle radii
+    grain_pos: vec2f,      // position in reference pixels
+    grain_fine: f32,
+    grain_clump: f32,
+    speckle: f32,
+    edge_rough: f32,
+    black: vec3f,
+}
+
+fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     let vsize = u.view.zw - u.view.xy;
     let cover = pos_to_cover(pos.xy);
     let opx = u.resolution.x / vsize.x;   // output pixels per cover unit
@@ -140,7 +162,6 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let c = fv.r;
     let m = fv.g;
     let vflow = fv.ba;
-    let scn = scene();
     let rel = cover_to_plane(scn.cam, cover) - scn.centre;
     let s_down = rel.x / scn.radius;
     let rr = length(rel) / scn.radius;
@@ -156,41 +177,96 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let rough = 0.12 * gfine;
 
     let black = rgb255(14.0, 11.0, 15.0) * (1.0 + 0.25 * gfine);
+
+    var pix: Pixel;
+    pix.pos = pos;
+    pix.cover = cover;
+    pix.out_px_per_cover = opx;
+    pix.out_px_per_ref = px;
+    pix.ref_px_per_out = fpx;
+    pix.field_step = fo;
+    pix.line = c;
+    pix.flow_label = m;
+    pix.line_grad_len = gl;
+    pix.line_grad_dir = gh;
+    pix.plane_rel = rel;
+    pix.obstacle_dist = rr;
+    pix.obstacle_down = s_down;
+    pix.grain_pos = gp;
+    pix.grain_fine = gfine;
+    pix.grain_clump = gclump;
+    pix.speckle = speck;
+    pix.edge_rough = rough;
+    pix.black = black;
+    return pix;
+}
+
+// Flat coloured stream.
+fn stream_color(pix: Pixel) -> vec3f {
+    let pos = pix.pos;
+    let px = pix.out_px_per_ref;
+    let c = pix.line;
+    let gl = pix.line_grad_len;
+    let rr = pix.obstacle_dist;
+    let s_down = pix.obstacle_down;
+    let speck = pix.speckle;
+    let rough = pix.edge_rough;
+    let black = pix.black;
+    let red = rgb255(232.0, 38.0, 56.0);
+    let pink = rgb255(240.0, 84.0, 140.0);
+    let amber = rgb255(236.0, 166.0, 46.0);
+    let orange = rgb255(240.0, 100.0, 40.0);
+    var sc = mix(red, pink, smoothstep(4.5, 1.3, rr) * (1.0 - smoothstep(1.2, 2.4, s_down)));
+    sc = mix(sc, orange, smoothstep(2.6, 3.6, s_down));
+    sc = mix(sc, amber, smoothstep(3.4, 4.6, s_down));
+    sc *= 1.0 + 0.035 * speck;
+    // bands beside the stream stand proud of it and shade it on the side away from the light
+    let ls = pos.xy + LIGHT * (2.2 * px);
+    let lc = sample_field(ls).r;
+    let shade_by = clamp(lc / gl * px + 0.5, 0.0, 1.0);
+    sc *= 1.0 - 0.4 * shade_by;
+    let cov = clamp((-c / gl + rough) * px + 0.5, 0.0, 1.0);
+    return mix(black, sc, cov);
+}
+
+// Lilac stripe bands and the gaps between them.
+fn band_color(pix: Pixel) -> vec3f {
+    let px = pix.out_px_per_ref;
+    let fpx = pix.ref_px_per_out;
+    let c = pix.line;
+    let m = pix.flow_label;
+    let gl = pix.line_grad_len;
+    let gh = pix.line_grad_dir;
+    let gfine = pix.grain_fine;
+    let gclump = pix.grain_clump;
+    let speck = pix.speckle;
+    let rough = pix.edge_rough;
+    let black = pix.black;
     var col = black;
-
-    if (c < 0.0) {
-        // flat coloured stream
-        let red = rgb255(232.0, 38.0, 56.0);
-        let pink = rgb255(240.0, 84.0, 140.0);
-        let amber = rgb255(236.0, 166.0, 46.0);
-        let orange = rgb255(240.0, 100.0, 40.0);
-        var sc = mix(red, pink, smoothstep(4.5, 1.3, rr) * (1.0 - smoothstep(1.2, 2.4, s_down)));
-        sc = mix(sc, orange, smoothstep(2.6, 3.6, s_down));
-        sc = mix(sc, amber, smoothstep(3.4, 4.6, s_down));
-        sc *= 1.0 + 0.035 * speck;
-        // bands beside the stream stand proud of it and shade it on the side away from the light
-        let ls = pos.xy + LIGHT * (2.2 * px);
-        let lc = sample_field(ls).r;
-        let shade_by = clamp(lc / gl * px + 0.5, 0.0, 1.0);
-        sc *= 1.0 - 0.4 * shade_by;
-        let cov = clamp((-c / gl + rough) * px + 0.5, 0.0, 1.0);
-        col = mix(black, sc, cov);
-    } else {
-        let b = band_at(c, gl, gh, m, px, rough);
-        if (b.coverage > 0.0) {
-            // speckle where the grain beats the local density; soft edges when minified
-            let thr = (0.5 - b.density) * 2.6;
-            let aa = 0.3 + 0.6 * smoothstep(0.5, 2.0, fpx);
-            let dots = smoothstep(thr - aa, thr + aa, speck) * smoothstep(0.0, 0.08, b.density);
-            var t = b.tone + 0.05 * gclump * smoothstep(0.85, 0.6, b.tone) + 0.03 * gfine - 0.44 * dots;
-            col = mix(black, lilac(t), b.coverage);
-        }
-        // stripes too fine for the pixels settle to their average instead of beating
-        let per_px = px / gl;
-        col = mix(col, mix(black, lilac(0.5), DUTY), smoothstep(3.5, 1.6, per_px));
+    let b = band_at(c, gl, gh, m, px, rough);
+    if (b.coverage > 0.0) {
+        // speckle where the grain beats the local density; soft edges when minified
+        let thr = (0.5 - b.density) * 2.6;
+        let aa = 0.3 + 0.6 * smoothstep(0.5, 2.0, fpx);
+        let dots = smoothstep(thr - aa, thr + aa, speck) * smoothstep(0.0, 0.08, b.density);
+        var t = b.tone + 0.05 * gclump * smoothstep(0.85, 0.6, b.tone) + 0.03 * gfine - 0.44 * dots;
+        col = mix(black, lilac(t), b.coverage);
     }
+    // stripes too fine for the pixels settle to their average instead of beating
+    let per_px = px / gl;
+    col = mix(col, mix(black, lilac(0.5), DUTY), smoothstep(3.5, 1.6, per_px));
+    return col;
+}
 
-    // the ball as a sphere in camera space (unit = plane distance scale), and the light
+// The ball as a sphere in camera space (unit = plane distance scale), and the light.
+struct Ball {
+    disc: vec2f,    // position on the ball's disc, in ball radii
+    disc_r: f32,    // distance from the disc centre, in ball radii
+    centre: vec3f,  // sphere centre in camera space
+    radius: f32,    // sphere radius in camera space
+}
+
+fn ball_geometry(cover: vec2f, scn: Scene) -> Ball {
     let d2 = (cover - BALL_C) / BALL_R;
     let rd2 = length(d2);
     let rb0 = ray(BALL_C + vec2f(0.0, 0.9 * BALL_R));
@@ -198,7 +274,21 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let c3 = ray(BALL_C) * (zb / FOCAL);
     let r3 = BALL_R * zb / FOCAL;
 
-    // its shadow on the liquid (soft, wider further from the ball) and a little contact occlusion
+    var ball: Ball;
+    ball.disc = d2;
+    ball.disc_r = rd2;
+    ball.centre = c3;
+    ball.radius = r3;
+    return ball;
+}
+
+// The ball's shadow on the liquid (soft, wider further from the ball) and a little contact occlusion,
+// as a factor on the colour.
+fn ball_shadow(pix: Pixel, scn: Scene, ball: Ball) -> f32 {
+    let cover = pix.cover;
+    let rr = pix.obstacle_dist;
+    let c3 = ball.centre;
+    let r3 = ball.radius;
     let r0 = ray(cover);
     let oc = r0 * (scn.cam.d / dot(scn.cam.n, r0)) - c3;
     let lb = dot(oc, LIGHT3);
@@ -208,10 +298,20 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let lit = max(mix(1.0, smoothstep(-pen, pen, lh), smoothstep(0.0, 0.3 * r3, -lb)),
                   smoothstep(1.05 * r3, 0.9 * r3, length(oc)));
     let contact = exp(-max(rr - 1.0, 0.0) * 12.0);
-    col *= (1.0 - (0.24 + P(P_BALL_SHADOW)) * (1.0 - lit)) * (1.0 - 0.18 * contact);
+    return (1.0 - (0.24 + P(P_BALL_SHADOW)) * (1.0 - lit)) * (1.0 - 0.18 * contact);
+}
 
-    // far fade toward the upper right: the paint breaks up into a mottled spray. The mottling
-    // lives in the liquid's own coordinates (stripe periods), so it drifts with the flow.
+// Far fade toward the upper right: the paint breaks up into a mottled spray. The mottling
+// lives in the liquid's own coordinates (stripe periods), so it drifts with the flow.
+fn spray_fade(col_in: vec3f, pix: Pixel) -> vec3f {
+    let cover = pix.cover;
+    let px = pix.out_px_per_ref;
+    let c = pix.line;
+    let m = pix.flow_label;
+    let gl = pix.line_grad_len;
+    let gfine = pix.grain_fine;
+    let black = pix.black;
+    var col = col_in;
     let fs = 0.45 * cover.x - 0.89 * cover.y - 0.22 * (cover.x - 0.6) * (cover.x - 0.6);
     let fd = 1.0 - smoothstep(-0.14, 0.4, fs);
     if (fd < 0.999 && c >= 0.0) {
@@ -235,138 +335,274 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         // a dim haze of the finest droplets between the blobs
         col = mix(mix(black, tone * 0.5, 0.35 * painted * (1.0 - painted)), pc, paint);
     }
+    return col;
+}
 
-    // ball: painted tone fitted to the cover. Bands on the camera side of the stream lap over
-    // it, so its lower edge is a waterline that follows the band edge; the stream runs behind.
-    if (rd2 < 1.02) {
-        let bz = sqrt(max(1.0 - dot(d2, d2), 0.0));
-        // the ball turns slowly in the current, so its metallic paint (grain and flakes) is
-        // fixed to the surface and travels with it
-        let s0 = vec3f(d2, -bz);
-        let ax = scn.cam.ev;
-        let th = (0.08 + P(P_BALL_SPIN)) * u.time;
-        let sr = s0 * cos(th) + cross(ax, s0) * sin(th) + ax * dot(ax, s0) * (1.0 - cos(th));
-        let sw = sr * sr * sr * sr;
-        let swn = sw / (sw.x + sw.y + sw.z);
-        let sa = BALL_R * REFPX;                    // ref px per unit of surface
-        let bfpx = fpx / max(bz, 0.3);
-        let tx = sr.yz * sa;
-        let ty = sr.zx * sa + 37.0;
-        let tz = sr.xy * sa - 91.0;
-        let wn = inverseSqrt(dot(swn, swn));
-        // toward the rim the surface is squeezed past what the pixels can hold, so the grain
-        // there is laid on the image instead
-        let onsurf = smoothstep(0.12, 0.4, bz);
-        let gb = mix(grain(gp, 1.5, fpx), (swn.x * grain(tx, 1.5, bfpx) + swn.y * grain(ty, 1.5, bfpx) + swn.z * grain(tz, 1.5, bfpx)) * wn, onsurf);
-        let gc = mix(grain(gp, 4.0, fpx), (swn.x * grain(tx, 4.0, bfpx) + swn.y * grain(ty, 4.0, bfpx) + swn.z * grain(tz, 4.0, bfpx)) * wn, onsurf);
+// The ball's surface point, turned with the ball, and the grain fixed to it.
+struct BallSurface {
+    height: f32,        // height of the surface point above the disc
+    point: vec3f,       // surface point on the unit sphere
+    turned: vec3f,      // the same point after the ball's turning
+    tex_x: vec2f,       // surface coordinates in reference pixels, one per projection axis
+    tex_y: vec2f,
+    tex_z: vec2f,
+    foot: f32,          // reference pixels per output pixel on the surface
+    grain_fine: f32,
+    grain_coarse: f32,
+}
 
-        var g = ball_lum(d2);
-        g += (0.045 * gb + 0.02 * gc) * mix(1.0, 0.3, smoothstep(0.55, 0.9, g));
+fn ball_surface(pix: Pixel, scn: Scene, ball: Ball) -> BallSurface {
+    let fpx = pix.ref_px_per_out;
+    let gp = pix.grain_pos;
+    let d2 = ball.disc;
+    let bz = sqrt(max(1.0 - dot(d2, d2), 0.0));
+    // the ball turns slowly in the current, so its metallic paint (grain and flakes) is
+    // fixed to the surface and travels with it
+    let s0 = vec3f(d2, -bz);
+    let ax = scn.cam.ev;
+    let th = (0.08 + P(P_BALL_SPIN)) * u.time;
+    let sr = s0 * cos(th) + cross(ax, s0) * sin(th) + ax * dot(ax, s0) * (1.0 - cos(th));
+    let sw = sr * sr * sr * sr;
+    let swn = sw / (sw.x + sw.y + sw.z);
+    let sa = BALL_R * REFPX;                    // ref px per unit of surface
+    let bfpx = fpx / max(bz, 0.3);
+    let tx = sr.yz * sa;
+    let ty = sr.zx * sa + 37.0;
+    let tz = sr.xy * sa - 91.0;
+    let wn = inverseSqrt(dot(swn, swn));
+    // toward the rim the surface is squeezed past what the pixels can hold, so the grain
+    // there is laid on the image instead
+    let onsurf = smoothstep(0.12, 0.4, bz);
+    let gb = mix(grain(gp, 1.5, fpx), (swn.x * grain(tx, 1.5, bfpx) + swn.y * grain(ty, 1.5, bfpx) + swn.z * grain(tz, 1.5, bfpx)) * wn, onsurf);
+    let gc = mix(grain(gp, 4.0, fpx), (swn.x * grain(tx, 4.0, bfpx) + swn.y * grain(ty, 4.0, bfpx) + swn.z * grain(tz, 4.0, bfpx)) * wn, onsurf);
 
-        // flakes: tiny tilted mirrors on the surface. Each shows the surroundings for its own
-        // tilted normal, read off the painted ball, so they glint as the turning brings them round.
-        let asr = abs(sr);
-        var ft = tz;
-        if (asr.x > asr.y && asr.x > asr.z) { ft = tx; } else if (asr.y > asr.z) { ft = ty; }
-        let fc = 2.6;
-        let fcell = floor(ft / fc);
-        let fh = hash22(fcell + 17.0);
-        let fd2 = length(ft / fc - fcell - 0.5 - 0.3 * fh);
-        let fsz = 0.22 * (0.7 + 0.3 * hash12(fcell + 5.0));
-        let fon = (1.0 - smoothstep(fsz - 0.08, fsz + 0.08, fd2)) * step(0.35, hash12(fcell + 3.0))
-            * (1.0 - smoothstep(0.6, 1.4, bfpx / fc));
-        let tilt = hash22(fcell + 29.0) * (0.3 + P(P_FLAKE_TILT));
-        let fn2 = d2 + tilt * bz;
-        let glint = ball_lum(fn2 / max(length(fn2), 1.0) * 0.98);
-        g = mix(g, max(glint, g * 0.8), fon * 0.65 * smoothstep(0.05, 0.25, bz));
+    var surf: BallSurface;
+    surf.height = bz;
+    surf.point = s0;
+    surf.turned = sr;
+    surf.tex_x = tx;
+    surf.tex_y = ty;
+    surf.tex_z = tz;
+    surf.foot = bfpx;
+    surf.grain_fine = gb;
+    surf.grain_coarse = gc;
+    return surf;
+}
 
-        g = clamp(g, 0.02, 0.97);
-        let warm = smoothstep(0.08, 0.6, g);
-        let scol = vec3f(g * mix(0.99, 1.0, warm), g * mix(1.0, 0.985, smoothstep(0.6, 0.9, g)), g * mix(0.86, 1.03, warm));
+// Flakes: tiny tilted mirrors on the surface. Each shows the surroundings for its own
+// tilted normal, read off the painted ball, so they glint as the turning brings them round.
+fn flake_glints(g_in: f32, ball: Ball, surf: BallSurface) -> f32 {
+    let d2 = ball.disc;
+    let bz = surf.height;
+    let sr = surf.turned;
+    let tx = surf.tex_x;
+    let ty = surf.tex_y;
+    let tz = surf.tex_z;
+    let bfpx = surf.foot;
+    var g = g_in;
+    let asr = abs(sr);
+    var ft = tz;
+    if (asr.x > asr.y && asr.x > asr.z) { ft = tx; } else if (asr.y > asr.z) { ft = ty; }
+    let fc = 2.6;
+    let fcell = floor(ft / fc);
+    let fh = hash22(fcell + 17.0);
+    let fd2 = length(ft / fc - fcell - 0.5 - 0.3 * fh);
+    let fsz = 0.22 * (0.7 + 0.3 * hash12(fcell + 5.0));
+    let fon = (1.0 - smoothstep(fsz - 0.08, fsz + 0.08, fd2)) * step(0.35, hash12(fcell + 3.0))
+        * (1.0 - smoothstep(0.6, 1.4, bfpx / fc));
+    let tilt = hash22(fcell + 29.0) * (0.3 + P(P_FLAKE_TILT));
+    let fn2 = d2 + tilt * bz;
+    let glint = ball_lum(fn2 / max(length(fn2), 1.0) * 0.98);
+    g = mix(g, max(glint, g * 0.8), fon * 0.65 * smoothstep(0.05, 0.25, bz));
+    return g;
+}
 
-        // the liquid mirrored in the chrome. The surface is not perfect: a slow waviness bends
-        // the image and its roughness blurs it, more toward the rim.
-        let wob = vec2f(gradient_noise(d2 * 3.1 + 4.0).x, gradient_noise(d2 * 3.1 - 9.0).x);
-        let bn = normalize(vec3f(d2 + 0.05 * wob, -bz));
-        let bp = c3 + s0 * r3;
-        let rdir = reflect(normalize(bp), bn);
-        let rden = dot(scn.cam.n, rdir);
-        // the painted waterline sits lower than the plane cuts the sphere, so rays from below
-        // the surface start just above it and pick up the liquid close by
-        let bpl = bp - scn.cam.n * max(dot(scn.cam.n, bp) - scn.cam.d + 0.03 * r3, 0.0);
-        let rt = (scn.cam.d - dot(scn.cam.n, bpl)) / rden;
-        let rh = bpl + rdir * rt;
-        let rcov = rh.xy / max(rh.z, 1e-3) * FOCAL + 0.5;
-        let rpos = cover_to_pos(rcov);
-        let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * (4.0 + P(P_REFLECTION_BLUR) + 4.0 * pow(1.0 - bz, 2.0)) + 1.5 * fo;
-        var refl = vec3f(0.0);
-        if (rt > 0.0 && rh.z > 0.0 && rd2 < 1.0) {
-            var rc = 0.0;
-            var rg = 0.05 * rfoot;
-            if (all(rpos >= vec2f(fo)) && all(rpos < u.resolution - fo)) {
-                rc = sample_field(rpos).r;
-                rg = rfoot * (0.5 / fo) * length(vec2f(sample_field(rpos + vec2f(fo, 0.0)).r - sample_field(rpos - vec2f(fo, 0.0)).r,
-                                                       sample_field(rpos + vec2f(0.0, fo)).r - sample_field(rpos - vec2f(0.0, fo)).r));
-            } else {
-                // off screen: undisturbed lines
-                let q = vec2f(dot(rh, scn.cam.eu), dot(rh, scn.cam.ev)) - scn.centre;
-                rc = abs(q.y * (1.0 - min(scn.radius * scn.radius / max(dot(q, q), 1e-4), 1.0))) - 0.8;
-            }
-            let rf = fract(rc);
-            let rband = clamp(min(rf - (1.0 - DUTY), 1.0 - rf) / max(rg, 1e-3) + 0.5, 0.0, 1.0);
-            let rline = mix(rband, DUTY, smoothstep(0.3, 0.8, rg));
-            refl = mix(rgb255(232.0, 60.0, 96.0), rgb255(168.0, 137.0, 182.0) * rline, clamp(rc / max(rg, 1e-3) + 0.5, 0.0, 1.0));
+// Painted tone fitted to the cover, with the surface grain and the flakes.
+fn ball_tone(ball: Ball, surf: BallSurface) -> f32 {
+    let d2 = ball.disc;
+    let gb = surf.grain_fine;
+    let gc = surf.grain_coarse;
+    var g = ball_lum(d2);
+    g += (0.045 * gb + 0.02 * gc) * mix(1.0, 0.3, smoothstep(0.55, 0.9, g));
+
+    g = flake_glints(g, ball, surf);
+
+    g = clamp(g, 0.02, 0.97);
+    return g;
+}
+
+fn chrome_color(g: f32) -> vec3f {
+    let warm = smoothstep(0.08, 0.6, g);
+    return vec3f(g * mix(0.99, 1.0, warm), g * mix(1.0, 0.985, smoothstep(0.6, 0.9, g)), g * mix(0.86, 1.03, warm));
+}
+
+// The liquid as the ball mirrors it, with the surface normal and ray origin it was found from.
+struct Mirror {
+    image: vec3f,   // colour of the mirrored liquid
+    facing: f32,    // reflected ray against the plane normal; positive when it heads for the liquid
+    normal: vec3f,  // surface normal, waviness included
+    origin: vec3f,  // ray origin, held above the waterline
+}
+
+// The liquid mirrored in the chrome. The surface is not perfect: a slow waviness bends
+// the image and its roughness blurs it, more toward the rim.
+fn liquid_reflection(pix: Pixel, scn: Scene, ball: Ball, surf: BallSurface) -> Mirror {
+    let fo = pix.field_step;
+    let d2 = ball.disc;
+    let rd2 = ball.disc_r;
+    let c3 = ball.centre;
+    let r3 = ball.radius;
+    let bz = surf.height;
+    let s0 = surf.point;
+    let wob = vec2f(gradient_noise(d2 * 3.1 + 4.0).x, gradient_noise(d2 * 3.1 - 9.0).x);
+    let bn = normalize(vec3f(d2 + 0.05 * wob, -bz));
+    let bp = c3 + s0 * r3;
+    let rdir = reflect(normalize(bp), bn);
+    let rden = dot(scn.cam.n, rdir);
+    // the painted waterline sits lower than the plane cuts the sphere, so rays from below
+    // the surface start just above it and pick up the liquid close by
+    let bpl = bp - scn.cam.n * max(dot(scn.cam.n, bp) - scn.cam.d + 0.03 * r3, 0.0);
+    let rt = (scn.cam.d - dot(scn.cam.n, bpl)) / rden;
+    let rh = bpl + rdir * rt;
+    let rcov = rh.xy / max(rh.z, 1e-3) * FOCAL + 0.5;
+    let rpos = cover_to_pos(rcov);
+    let rfoot = (length(dpdx(rpos)) + length(dpdy(rpos))) * (4.0 + P(P_REFLECTION_BLUR) + 4.0 * pow(1.0 - bz, 2.0)) + 1.5 * fo;
+    var refl = vec3f(0.0);
+    if (rt > 0.0 && rh.z > 0.0 && rd2 < 1.0) {
+        var rc = 0.0;
+        var rg = 0.05 * rfoot;
+        if (all(rpos >= vec2f(fo)) && all(rpos < u.resolution - fo)) {
+            rc = sample_field(rpos).r;
+            rg = rfoot * (0.5 / fo) * length(vec2f(sample_field(rpos + vec2f(fo, 0.0)).r - sample_field(rpos - vec2f(fo, 0.0)).r,
+                                                   sample_field(rpos + vec2f(0.0, fo)).r - sample_field(rpos - vec2f(0.0, fo)).r));
+        } else {
+            // off screen: undisturbed lines
+            let q = vec2f(dot(rh, scn.cam.eu), dot(rh, scn.cam.ev)) - scn.centre;
+            rc = abs(q.y * (1.0 - min(scn.radius * scn.radius / max(dot(q, q), 1e-4), 1.0))) - 0.8;
         }
+        let rf = fract(rc);
+        let rband = clamp(min(rf - (1.0 - DUTY), 1.0 - rf) / max(rg, 1e-3) + 0.5, 0.0, 1.0);
+        let rline = mix(rband, DUTY, smoothstep(0.3, 0.8, rg));
+        refl = mix(rgb255(232.0, 60.0, 96.0), rgb255(168.0, 137.0, 182.0) * rline, clamp(rc / max(rg, 1e-3) + 0.5, 0.0, 1.0));
+    }
+
+    var mir: Mirror;
+    mir.image = refl;
+    mir.facing = rden;
+    mir.normal = bn;
+    mir.origin = bpl;
+    return mir;
+}
+
+// Light bounced off the liquid tints the side facing it: the colour of the liquid that
+// way, blurred wide, so it shifts as the stream and the bands move past.
+fn add_bounced_light(scol2_in: vec3f, g: f32, pix: Pixel, scn: Scene, mir: Mirror) -> vec3f {
+    let fo = pix.field_step;
+    let opx = pix.out_px_per_cover;
+    let black = pix.black;
+    let bn = mir.normal;
+    let bpl = mir.origin;
+    var scol2 = scol2_in;
+    let nd = dot(scn.cam.n, bn);
+    if (nd > 0.02) {
+        let bh = bpl + bn * ((scn.cam.d - dot(scn.cam.n, bpl)) / nd);
+        let bpos = cover_to_pos(bh.xy / max(bh.z, 1e-3) * FOCAL + 0.5);
+        let spread = 0.3 * BALL_R * opx;
+        let band_avg = mix(black, lilac(0.55), DUTY);
+        var acc = vec3f(0.0);
+        for (var k = 0; k < 5; k++) {
+            let o = select(vec2f(f32(k & 1) * 2.0 - 1.0, f32(k >> 1u & 1) * 2.0 - 1.0), vec2f(0.0), k == 4);
+            let cc = sample_field(clamp(bpos + o * spread, vec2f(fo), u.resolution - fo)).r;
+            acc += mix(rgb255(236.0, 56.0, 80.0), band_avg, smoothstep(-0.3, 0.3, cc));
+        }
+        scol2 += acc * (0.2 * (0.22 + P(P_BOUNCE_TINT))) * smoothstep(0.02, 0.5, nd) * (1.0 - 0.6 * g);
+    }
+    return scol2;
+}
+
+// Lays the ball over the liquid. Bands on the camera side lap over it, and along the
+// waterline the liquid climbs the ball in a rolled lip that catches the light, with glints
+// carried along it by the flow; the ball just above sits in its shade.
+fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec3f {
+    let opx = pix.out_px_per_cover;
+    let px = pix.out_px_per_ref;
+    let c = pix.line;
+    let m = pix.flow_label;
+    let gl = pix.line_grad_len;
+    let gh = pix.line_grad_dir;
+    let rel = pix.plane_rel;
+    let d2 = ball.disc;
+    let rd2 = ball.disc_r;
+    var col = col_in;
+    var scol2 = scol2_in;
+    let liquid = clamp(c / gl * px + 0.5, 0.0, 1.0);          // 1 on bands and gaps, 0 on the stream
+    let near = select(0.0, 1.0, rel.y < 0.0);
+    let low = smoothstep(0.5, 0.56, d2.y - 0.25 * d2.x);     // far-side bands rejoin in front low on the right
+    let front = liquid * max(near, low);
+
+    let wl = c / gl;                                         // ref px from the waterline, + on the liquid
+    let side = max(near, low) * smoothstep(1.0, 0.96, rd2);
+    scol2 *= 1.0 - 0.45 * side * exp(min(wl, 0.0) / 3.5);
+    var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);
+    if (P(P_DEBUG_BALL_OUTLINE) > 0.5) { cov *= 0.35; }
+    col = mix(col, scol2, cov);
+    let ride = smoothstep(-0.3, 0.5, gradient_noise(vec2f(m * 0.8, 3.3)).x * 1.6 + 0.5 * gradient_noise(vec2f(m * 2.6, 9.1)).x);
+    let facing = 0.3 + 0.7 * smoothstep(-0.5, 0.6, dot(-gh, LIGHT));
+    let crest = exp(-pow((wl - 1.3) / 0.75, 2.0));
+    let sheen = exp(-pow((wl - 2.8) / 1.6, 2.0));
+    let lip = side * (1.0 - cov) * facing;
+    col = mix(col, rgb255(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
+    col += rgb255(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
+    if (P(P_DEBUG_BALL_OUTLINE) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
+    return col;
+}
+
+// The ball: painted tone fitted to the cover, with the liquid mirrored in it and lapping over it.
+fn paint_ball(col_in: vec3f, pix: Pixel, scn: Scene, ball: Ball) -> vec3f {
+    var col = col_in;
+    if (ball.disc_r < 1.02) {
+        let surf = ball_surface(pix, scn, ball);
+        let bz = surf.height;
+        let gc = surf.grain_coarse;
+        let g = ball_tone(ball, surf);
+        let scol = chrome_color(g);
+        let mir = liquid_reflection(pix, scn, ball, surf);
+        let refl = mir.image;
+        let rden = mir.facing;
         // the lower half faces the liquid and mirrors its moving lines, strongest at grazing angles
         let rk = smoothstep(0.08, 0.6, rden) * (0.16 + P(P_BALL_REFLECTION) + 0.34 * pow(1.0 - bz, 2.0)) * (1.0 + 0.15 * gc);
         var scol2 = mix(scol, refl * 1.1 + scol * 0.25, rk);
-
-        // light bounced off the liquid tints the side facing it: the colour of the liquid that
-        // way, blurred wide, so it shifts as the stream and the bands move past
-        let nd = dot(scn.cam.n, bn);
-        if (nd > 0.02) {
-            let bh = bpl + bn * ((scn.cam.d - dot(scn.cam.n, bpl)) / nd);
-            let bpos = cover_to_pos(bh.xy / max(bh.z, 1e-3) * FOCAL + 0.5);
-            let spread = 0.3 * BALL_R * opx;
-            let band_avg = mix(black, lilac(0.55), DUTY);
-            var acc = vec3f(0.0);
-            for (var k = 0; k < 5; k++) {
-                let o = select(vec2f(f32(k & 1) * 2.0 - 1.0, f32(k >> 1u & 1) * 2.0 - 1.0), vec2f(0.0), k == 4);
-                let cc = sample_field(clamp(bpos + o * spread, vec2f(fo), u.resolution - fo)).r;
-                acc += mix(rgb255(236.0, 56.0, 80.0), band_avg, smoothstep(-0.3, 0.3, cc));
-            }
-            scol2 += acc * (0.2 * (0.22 + P(P_BOUNCE_TINT))) * smoothstep(0.02, 0.5, nd) * (1.0 - 0.6 * g);
-        }
-
-        let liquid = clamp(c / gl * px + 0.5, 0.0, 1.0);          // 1 on bands and gaps, 0 on the stream
-        let near = select(0.0, 1.0, rel.y < 0.0);
-        let low = smoothstep(0.5, 0.56, d2.y - 0.25 * d2.x);     // far-side bands rejoin in front low on the right
-        let front = liquid * max(near, low);
-
-        // meniscus: along the waterline the liquid climbs the ball in a rolled lip that catches
-        // the light, with glints carried along it by the flow; the ball just above sits in its shade
-        let wl = c / gl;                                         // ref px from the waterline, + on the liquid
-        let side = max(near, low) * smoothstep(1.0, 0.96, rd2);
-        scol2 *= 1.0 - 0.45 * side * exp(min(wl, 0.0) / 3.5);
-        var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);
-        if (P(P_DEBUG_BALL_OUTLINE) > 0.5) { cov *= 0.35; }
-        col = mix(col, scol2, cov);
-        let ride = smoothstep(-0.3, 0.5, gradient_noise(vec2f(m * 0.8, 3.3)).x * 1.6 + 0.5 * gradient_noise(vec2f(m * 2.6, 9.1)).x);
-        let facing = 0.3 + 0.7 * smoothstep(-0.5, 0.6, dot(-gh, LIGHT));
-        let crest = exp(-pow((wl - 1.3) / 0.75, 2.0));
-        let sheen = exp(-pow((wl - 2.8) / 1.6, 2.0));
-        let lip = side * (1.0 - cov) * facing;
-        col = mix(col, rgb255(240.0, 228.0, 248.0), lip * crest * (0.25 + 0.75 * ride) * 0.9);
-        col += rgb255(150.0, 120.0, 175.0) * lip * sheen * 0.18 * (0.5 + 0.5 * ride);
-        if (P(P_DEBUG_BALL_OUTLINE) > 0.5 && abs(rd2 - 1.0) < 0.012) { col = vec3f(0.0, 1.0, 0.0); }
+        scol2 = add_bounced_light(scol2, g, pix, scn, mir);
+        col = composite_ball(col, scol2, pix, ball);
     }
+    return col;
+}
 
-    // glare round the two highlights, breathing a little as if light came through moving water
+// Glare round the two highlights, breathing a little as if light came through moving water.
+fn glare(col_in: vec3f, cover: vec2f) -> vec3f {
     let fl1 = 1.0 + 0.1 * gradient_noise(vec2f(u.time * 0.9, 1.7)).x * 2.0;
     let h1 = length(cover - (BALL_C + BALL_R * vec2f(-0.43, -0.45))) / BALL_R;
     let h2 = length(cover - (BALL_C + BALL_R * vec2f(0.045, -0.57))) / BALL_R;
     let glow = (0.3 * exp(-pow(h1 / 0.42, 2.0)) + 0.07 * exp(-h1 / 0.45)
               + 0.22 * exp(-pow(h2 / 0.2, 2.0)) + 0.04 * exp(-h2 / 0.3)) * fl1 * (1.0 + P(P_GLARE_GAIN));
-    col = 1.0 - (1.0 - col) * (1.0 - glow * rgb255(255.0, 236.0, 250.0));
+    return 1.0 - (1.0 - col_in) * (1.0 - glow * rgb255(255.0, 236.0, 250.0));
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let scn = scene();
+    let pix = pixel_state(pos.xy, scn);
+    let ball = ball_geometry(pix.cover, scn);
+
+    var col: vec3f;
+    if (pix.line < 0.0) {
+        col = stream_color(pix);
+    } else {
+        col = band_color(pix);
+    }
+    col *= ball_shadow(pix, scn, ball);
+    col = spray_fade(col, pix);
+    col = paint_ball(col, pix, scn, ball);
+    col = glare(col, pix.cover);
     return vec4f(col, 1.0);
 }
