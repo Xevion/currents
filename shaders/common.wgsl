@@ -1,7 +1,7 @@
 struct U {
     resolution: vec2f,
     time: f32,
-    _pad: f32,
+    fscale: f32,
     view: vec4f,
     params: array<vec4f, 8>,
 }
@@ -23,13 +23,12 @@ const HG = -0.02587;
 const HH = 1.10028;
 const FOCAL = 1.2;
 
-const BALL_C = vec2f(0.537, 0.631);
-const BALL_R = 0.118;
+const BALL_C = vec2f(0.543, 0.661);
+const BALL_R = 0.1205;
 const REFPX = 1500.0; // "px" below means pixels of the 1500px reference cover
 
 const FLOW_U = 4.0;     // periods per second
-const STEPS = 24;
-const TAU_MAX = 7.0;
+const STEPS = 64;
 
 struct Cam {
     n: vec3f,   // unit plane normal, pointing away from camera
@@ -105,27 +104,20 @@ fn vnoise(p: vec2f) -> f32 {
 
 struct Scene {
     cam: Cam,
-    bc: vec3f,   // sphere centre (camera space)
-    br: f32,     // sphere radius
-    tb: f32,
-    qb: vec2f,   // flow disc centre on the plane
-    a: f32,      // flow disc radius
+    qb: vec2f,   // obstacle centre on the plane
+    a: f32,      // obstacle radius on the plane
     g: vec2f,    // plane direction of screen-down at the ball
 }
 
+// The ball is a screen-space circle; the flow obstacle is a plane disc under its lower half,
+// so lines wrap the lower silhouette and pass behind the top.
 fn scene() -> Scene {
     var s: Scene;
     s.cam = camera();
-    let rb = ray(BALL_C);
-    let sink = 0.6 + P(0);
-    s.tb = s.cam.d / (dot(s.cam.n, rb) + sink * BALL_R);
-    s.bc = rb * s.tb;
-    s.br = BALL_R * s.tb;
-    let foot = s.bc + s.cam.n * (sink * s.br);
-    s.a = s.br * (0.9 + P(1));
-    let qc = plane_q(s.cam, BALL_C);
-    s.g = normalize(plane_q(s.cam, BALL_C + vec2f(0.0, 0.01)) - qc);
-    s.qb = vec2f(dot(foot, s.cam.eu), dot(foot, s.cam.ev)) - s.g * s.br * (0.2 + P(2)) + vec2f(s.br * (-0.2 + P(3)), 0.0);
+    let oc = BALL_C + BALL_R * vec2f(-0.12 + P(2), -0.25 + P(3));
+    s.qb = plane_q(s.cam, oc);
+    s.a = length(plane_q(s.cam, oc + vec2f(0.84 * BALL_R, 0.0)) - s.qb) * (1.0 + P(1));
+    s.g = normalize(plane_q(s.cam, oc + vec2f(0.0, 0.01)) - s.qb);
     return s;
 }
 
@@ -142,4 +134,4 @@ fn pos_of(cover: vec2f) -> vec2f {
     return (cover - u.view.xy) / (u.view.zw - u.view.xy) * u.resolution;
 }
 
-const DUTY = 0.6;
+const DUTY = 0.52;
