@@ -1,0 +1,21 @@
+# Long lines beat tall wrapping. The default 100 is not really the problem: the
+# sub-widths derived from it are. `struct_lit_width` defaults to 18, which
+# shatters a three-field literal across five lines however wide the page is.
+max_width = 120
+
+# Ties every sub-width to max_width instead of a fraction of it. This is the
+# setting that actually stops the wrapping; raising max_width alone barely moves
+# it, and tuning the sub-widths individually trades one bad break for another.
+use_small_heuristics = "Max"
+
+# Set explicitly so a bare `rustfmt` on one file matches what `cargo fmt` does.
+edition = "2024"
+style_edition = "2024"
+newline_style = "Unix"
+
+# `Foo { bar }` rather than `Foo { bar: bar }`.
+use_field_init_shorthand = true
+
+# Trailing comma after a block match arm, so adding the next one is a one-line
+# diff rather than two.
+match_block_trailing_comma = true

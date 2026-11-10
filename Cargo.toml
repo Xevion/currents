@@ -2,6 +2,7 @@
 name = "currents"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 bytemuck = "1.25.2"
@@ -10,3 +11,54 @@ image = "0.25.10"
 pollster = "1.0.1"
 wgpu = "30.0.1"
 winit = "0.30.13"
+
+[lints.rust]
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+redundant_lifetimes = "warn"
+meta_variable_misuse = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "warn"
+
+must_use_candidate = "allow"
+
+# The typed snafu enum is the documentation.
+missing_errors_doc = "allow"
+
+# A panic here is an invariant violation, not a documented contract.
+missing_panics_doc = "allow"
+
+# Noisy, and it fights builders that later gain a body.
+missing_const_for_fn = "allow"
+
+option_if_let_else = "allow"
+redundant_pub_crate = "allow"
+
+# Pixel sizes and cover coordinates move between u32 and f32 constantly; every cast is bounded by the image size.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+
+# wgpu descriptors take `Default::default()`; the type name adds nothing.
+default_trait_access = "allow"
+
+# A fused multiply-add rounds differently, which would shift rendered pixels.
+suboptimal_flops = "allow"
+
+# Dependencies are never rebuilt, and an unoptimised PNG encoder is unusably slow.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Release speed with symbols, so `perf` can attribute samples to a function.
+[profile.profiling]
+inherits = "release"
+debug = 1
