@@ -83,9 +83,10 @@ impl Uniforms {
         shape(self) == shape(before) && (0.0..MAX_BLEND_GAP).contains(&(self.time - before.time))
     }
 
-    /// Whether `other` shows the same picture at some other time.
-    fn same_picture(&self, other: &Self) -> bool {
-        Self { time: 0.0, ..*self } == Self { time: 0.0, ..*other }
+    /// Whether this frame shows the flow `before` showed, no earlier in time. The view and the
+    /// picture's size may have changed: keys span the cover, not the screen.
+    fn continues(&self, before: &Self) -> bool {
+        self.params == before.params && self.time >= before.time
     }
 
     fn with_key(mut self, key: &Key) -> Self {
@@ -148,7 +149,7 @@ struct Targets {
     history: History,
 }
 
-/// A texture keys are rendered into.
+/// A texture keys are rendered into, at least as large as the key it holds.
 struct KeyTarget {
     size: [u32; 2],
     view: wgpu::TextureView,
@@ -166,6 +167,7 @@ struct KeyBinds {
 /// the same view moving forward in time the renderer keeps a key: that history at a fixed
 /// time, read by every frame of a stretch of flow. Only the first key is traced; each one
 /// after is the key before it carried forward, a few stripes a frame while that one serves.
+/// Keys span part of the cover, so they go on serving while the view moves.
 pub struct Renderer {
     ubuf: wgpu::Buffer,
     noise: wgpu::TextureView,
@@ -184,12 +186,7 @@ pub struct Renderer {
     keys: Keys,
     /// The last frame rendered, to tell whether this one continues it.
     last: Option<Uniforms>,
-    /// Whether the last frame showed a different picture from the one before it and was
-    /// traced roughly for speed.
-    rough: bool,
     field: Pass,
-    /// The field pass with the rough trace, for frames while the picture is changing.
-    field_rough: wgpu::RenderPipeline,
     shade: Pass,
     /// One pipeline per `FieldView`, in its order, bound like the shade pass.
     debug: Vec<wgpu::RenderPipeline>,
@@ -260,24 +257,8 @@ impl Renderer {
         let field_source = sources.assemble(&sources.field);
         let key_pass = Pass::new(device, "key", field_source.clone(), "fs_key", Inputs::loaded(1), &[], key::FORMAT);
         let hop = Pass::new(device, "hop", field_source.clone(), "fs_hop", Inputs::NONE, &HOP_CONSTANTS, FIELD_FORMAT);
-        let field = Pass::new(
-            device,
-            "field",
-            field_source.clone(),
-            "fs_main",
-            Inputs::loaded(2),
-            &HOP_CONSTANTS,
-            FIELD_FORMAT,
-        );
-        let field_rough = pass::pipeline(
-            device,
-            "field-rough",
-            field_source,
-            "fs_main",
-            &field.layout,
-            &[HOP_CONSTANTS[0], ("rough", 1.0)],
-            FIELD_FORMAT,
-        );
+        let field =
+            Pass::new(device, "field", field_source, "fs_main", Inputs::loaded(2), &HOP_CONSTANTS, FIELD_FORMAT);
         let shade = Pass::new(
             device,
             "shade",
@@ -333,9 +314,7 @@ impl Renderer {
             key_binds: None,
             keys: Keys::default(),
             last: None,
-            rough: false,
             field,
-            field_rough,
             shade,
             debug,
             targets: None,
@@ -362,22 +341,23 @@ impl Renderer {
     }
 
     /// Decides which key, if any, this frame reads, and returns the stripes of a key to render
-    /// before it. A frame gets a key only when it continues the last one: the same picture, no
-    /// earlier in time. A still or a moving camera would pay for a key and use it once.
+    /// before it. A frame gets a key only when it continues the last one: a still would pay
+    /// for a key and use it once.
     fn update_keys(
         &mut self,
         device: &wgpu::Device,
         uniforms: &Uniforms,
         field_texels: [u32; 2],
     ) -> Option<key::Slice> {
-        let dt = self.last.filter(|last| last.same_picture(uniforms)).map(|last| uniforms.time - last.time);
-        self.rough = self.last.is_some() && dt.is_none();
+        let before = self.last.filter(|before| uniforms.continues(before));
         self.last = Some(*uniforms);
-        let Some(dt) = dt.filter(|&dt| dt >= 0.0) else {
+        let Some(before) = before else {
             self.keys.clear();
             return None;
         };
-        let slice = self.keys.advance(uniforms.time, dt, uniforms.view, field_texels)?;
+        let dt = uniforms.time - before.time;
+        let drift = std::array::from_fn(|i| uniforms.view[i] - before.view[i]);
+        let slice = self.keys.advance(uniforms.time, dt, uniforms.view, drift, field_texels)?;
         if slice.is_heavy() {
             // a large share of a key in one frame is a visible hitch
             tracing::debug!(
@@ -389,9 +369,19 @@ impl Renderer {
                 "rendering much of a key at once"
             );
         }
-        if slice.stripes.start == 0 && self.key_targets[slice.slot].size != slice.key.size {
-            self.key_targets[slice.slot] = key_target(device, slice.key.size);
-            self.key_binds = None;
+        if slice.stripes.start == 0 {
+            let [width, height] = slice.key.size;
+            let held = self.key_targets[slice.slot].size;
+            let moving = drift.iter().any(|&edge| edge != 0.0);
+            // a moving view asks for a slightly different size each time, so its keys get
+            // room to spare and keep their texture; one at rest gets exactly its own
+            let fits = held[0] >= width && held[1] >= height;
+            let loose = u64::from(held[0]) * u64::from(held[1]) > u64::from(width) * u64::from(height) * 5 / 4;
+            if !fits || (loose && !moving) {
+                let spare = |texels: u32| if moving { texels + texels / 8 } else { texels };
+                self.key_targets[slice.slot] = key_target(device, [spare(width), spare(height)]);
+                self.key_binds = None;
+            }
         }
         Some(slice)
     }
@@ -537,7 +527,7 @@ impl Renderer {
             draw_fullscreen(enc, &t.hop_view, &self.hop.pipeline, &self.hop_bind, stamps);
         }
         let field_bind = &key_binds[held.map_or(0, |(slot, _)| slot)].field;
-        let field = if self.rough { &self.field_rough } else { &self.field.pipeline };
+        let field = &self.field.pipeline;
         draw_fullscreen(enc, &t.field_view, field, field_bind, stamps(0, !keyed && held.is_none(), true));
         let colour = view.map_or(&self.shade.pipeline, |v| &self.debug[v as usize]);
         if blend {
@@ -552,10 +542,10 @@ impl Renderer {
         rebuilt
     }
 
-    /// Whether the last frame was rendered in full; `false` after one traced roughly because
-    /// the picture was changing, which rendering the same frame again puts right.
+    /// Whether the last frame is as good as its picture gets; `false` while a key is being
+    /// fitted to a view that moved, which rendering the same frame again carries on with.
     pub const fn settled(&self) -> bool {
-        !self.rough
+        !self.keys.busy()
     }
 
     pub fn color(&self) -> &wgpu::Texture {
@@ -580,7 +570,6 @@ mod tests {
         let source = sources.assemble(&sources.field);
         validate("field", &source);
         to_webgl("field", &source, &[]);
-        to_webgl("field-rough", &source, &[("rough", 1.0)]);
     }
 
     #[rstest]

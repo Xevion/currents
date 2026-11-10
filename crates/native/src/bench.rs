@@ -44,10 +44,13 @@ const STAGES: &[Stage] = &[
         name: "eddy noise",
         edits: &[
             (
-                "let n1 = flow_noise(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));",
+                "let n1 = gradient_noise_smooth(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));",
                 "let n1 = vec3f(0.0 * t);",
             ),
-            ("let n2 = flow_noise(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));", "let n2 = vec3f(0.0 * t);"),
+            (
+                "let n2 = gradient_noise_smooth(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));",
+                "let n2 = vec3f(0.0 * t);",
+            ),
         ],
     },
     Stage {
@@ -66,7 +69,7 @@ const STAGES: &[Stage] = &[
     Stage {
         pass: PassKind::Field,
         name: "key read",
-        edits: &[("liquid = key_liquid(rel + acc.xy, scn, false);", "liquid = rel + acc.xy;")],
+        edits: &[("liquid = key_liquid(rel + acc.xy, scn, coarse);", "liquid = rel + acc.xy;")],
     },
     Stage {
         pass: PassKind::Field,

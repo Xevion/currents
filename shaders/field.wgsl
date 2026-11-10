@@ -11,16 +11,6 @@ const MAX_TRACE_DT = 0.25;
 const MAX_TRACE_STEPS = 192;
 const FLOW_SPEED = 4.0;   // periods per second
 
-// Set for frames that cannot build on the one before (the camera is moving): they trace
-// every pixel in full, so the trace gives up the accuracy that keeps successive keys in
-// agreement for about four times the speed.
-override rough: bool = false;
-
-fn flow_noise(p: vec2f) -> vec3f {
-    if (rough) { return gradient_noise(p); }
-    return gradient_noise_smooth(p);
-}
-
 // smoothstep and its slope
 fn smoothstep_with_slope(a: f32, b: f32, x: f32) -> vec2f {
     let t = clamp((x - a) / (b - a), 0.0, 1.0);
@@ -101,8 +91,8 @@ fn flow_velocity(y: vec2f, t: f32, scn: Scene) -> vec2f {
     let l2 = 5.5 + P(P_EDDY_LEN_SMALL);
     let a1 = 1.4 + P(P_EDDY_AMP_LARGE);
     let a2 = 0.4 + P(P_EDDY_AMP_SMALL);
-    let n1 = flow_noise(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));
-    let n2 = flow_noise(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));
+    let n1 = gradient_noise_smooth(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));
+    let n2 = gradient_noise_smooth(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));
     let nv = a1 * lx * n1.x + a2 * l2 * n2.x;
     let ng = vec2f(a1 * n1.y + a2 * n2.y, a1 * lx / ly * n1.z + a2 * n2.z);
 
@@ -137,7 +127,6 @@ fn step_back(y: vec2f, t: f32, dt: f32, scn: Scene) -> vec2f {
     let half = 0.5 * dt;
     let v1 = flow_velocity(y, t, scn);
     let v2 = flow_velocity(y - v1 * half, t - half, scn);
-    if (rough) { return y - v2 * dt; }
     let v3 = flow_velocity(y - v2 * half, t - half, scn);
     let v4 = flow_velocity(y - v3 * dt, t - dt, scn);
     return y - (v1 + 2.0 * (v2 + v3) + v4) * (dt / 6.0);
@@ -164,9 +153,7 @@ fn traced(p: vec2f, t: f32, scn: Scene) -> vec2f {
     if (d <= 0.0) { return steady_liquid(y, t, scn); }
     // every trace runs until it is clear, however slow the water: one that stopped among the
     // eddies would give a different answer for the same liquid from a different start
-    // a rough trace stops at a third of the steps, leaving only the slowest water unfinished
-    let steps = select(MAX_TRACE_STEPS, MAX_TRACE_STEPS / 3, rough);
-    for (var i = 0; i < steps; i++) {
+    for (var i = 0; i < MAX_TRACE_STEPS; i++) {
         let tt = t - f32(i) * MAX_TRACE_DT;
         let yn = step_back(y, tt, MAX_TRACE_DT, scn);
         let dn = inflow_distance(yn, scn);
@@ -174,7 +161,7 @@ fn traced(p: vec2f, t: f32, scn: Scene) -> vec2f {
         y = yn;
         d = dn;
     }
-    return steady_liquid(y, t - f32(steps) * MAX_TRACE_DT, scn);
+    return steady_liquid(y, t - f32(MAX_TRACE_STEPS) * MAX_TRACE_DT, scn);
 }
 
 // A key is the traced liquid over the view and a margin round it, at a time a little before
@@ -225,8 +212,9 @@ fn hop_back(p: vec2f, scn: Scene) -> Hop {
 }
 
 // The liquid that was at y at the key's time. A frame blends the four texels round the
-// point, which places a line within a few hundredths of a pixel. A key carried forward
-// (`exact`) is read again by every key after it, so it takes the cubic through sixteen.
+// point, which places a line within a few hundredths of a pixel. A key carried forward is read
+// again by every key after it, and a key coarser than the frame is stretched over several
+// pixels; those (`exact`) take the cubic through sixteen.
 fn key_liquid(y: vec2f, scn: Scene, exact: bool) -> vec2f {
     let cover = plane_to_cover(scn.cam, y + scn.centre);
     let g = (cover - u.key_view.xy) / (u.key_view.zw - u.key_view.xy) * u.key_size - 0.5;
@@ -307,6 +295,8 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     var liquid: vec2f;
     var vs: vec2f;
     if (u.key_size.x > 0.0) {
+        // the view has closed in on a key made for a wider one
+        let coarse = u.key_size.x * (u.view.z - u.view.x) * u.field_scale < 0.9 * u.resolution.x * (u.key_view.z - u.key_view.x);
         let g = pos.xy / hop_step + 1.0;
         let cell = vec2i(floor(g));
         let f = fract(g);
@@ -318,9 +308,9 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let whole = max(max(h00.x, h10.x), max(h01.x, h11.x)) < 0.5 * NO_HOP;
         // by a hop that ended in the steady flow, each texel follows its own liquid back
         if (whole) {
-            liquid = key_liquid(rel + acc.xy, scn, false);
+            liquid = key_liquid(rel + acc.xy, scn, coarse);
         } else {
-            liquid = carried(rel, scn, false);
+            liquid = carried(rel, scn, coarse);
         }
         if (all(abs(acc.zw) < vec2f(1e9))) {
             vs = acc.zw;

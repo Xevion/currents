@@ -31,6 +31,18 @@ const STRIPES: u32 = 64;
 /// Fastest liquid allowed for when sizing the margin, along and across the flow, as multiples
 /// of the flow speed. Faster liquid than this is traced in full by the frames that meet it.
 const PEAK_SPEED: [f32; 2] = [1.5, 0.5];
+/// Frames a key refitted round a moving view is rendered over.
+const REFIT_FRAMES: u32 = 6;
+/// Frames a key traced afresh for a view that has come to rest is rendered over.
+const RETRACE_FRAMES: u32 = 24;
+/// Frames of the view's movement a key must still hold before it is refitted, and the frames
+/// of movement the refitted key allows for.
+const CHECK_LEAD: f32 = 8.0;
+const PLAN_LEAD: f32 = 20.0;
+/// Furthest a key reaches after a moving view, as a share of the view's size.
+const MAX_LEAD: f32 = 0.25;
+/// A key with less than this share of the detail the view shows is traced afresh.
+const SOFT: f32 = 0.85;
 
 type Vec3 = [f32; 3];
 
@@ -114,42 +126,78 @@ fn reach(view: [f32; 4]) -> Option<f32> {
     reach.is_finite().then_some(reach)
 }
 
+/// The span a key over `view` serves and the margin it adds on each side, as fractions of the
+/// view's width and height; `None` where a key would not pay: the view reaches the horizon, or
+/// the liquid crosses it within a few frames.
+fn terms(view: [f32; 4], field: [u32; 2]) -> Option<(f32, [f32; 2])> {
+    let reach = reach(view)?;
+    let span = if reach > MAX_MARGIN { SPAN * MAX_MARGIN / reach } else { SPAN };
+    // three texels more for the interpolation's footprint
+    (span >= MIN_SPAN).then(|| (span, std::array::from_fn(|axis| reach.min(MAX_MARGIN) + 3.0 / field[axis] as f32)))
+}
+
+fn extent(view: [f32; 4]) -> [f32; 2] {
+    [view[2] - view[0], view[3] - view[1]]
+}
+
+/// The smallest rectangle holding both `a` and `b`.
+fn joined(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+fn grown(view: [f32; 4], by: [f32; 2]) -> [f32; 4] {
+    [view[0] - by[0], view[1] - by[1], view[2] + by[0], view[3] + by[1]]
+}
+
+/// Where `view` gets to after `frames` more frames each changing it by `drift`, no edge moving
+/// further than a share of the view's size.
+fn ahead(view: [f32; 4], drift: [f32; 4], frames: f32) -> [f32; 4] {
+    let size = extent(view);
+    std::array::from_fn(|i| {
+        let most = MAX_LEAD * size[i % 2];
+        view[i] + (drift[i] * frames).clamp(-most, most)
+    })
+}
+
 /// When a key is taken, what it spans and how long it serves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Key {
     pub(super) time: f32,
     /// Seconds after `time` the key serves.
     pub(super) span: f32,
-    /// Part of the cover it spans: the view and a margin.
+    /// Part of the cover it spans: the view, a margin, and where the view was heading.
     pub(super) view: [f32; 4],
-    /// Texels across it, as fine as the field.
+    /// Texels across it, as fine as the field was.
     pub(super) size: [u32; 2],
+    /// Texels per unit of the cover's width its liquid was resolved at: its own, or fewer when
+    /// carried forward from a coarser key.
+    pub(super) detail: f32,
 }
 
 impl Key {
     /// The key for a frame at `time` showing `view` with a field of `field` texels, or `None`
-    /// where one would not pay: the liquid crosses the view within a few frames.
+    /// where one would not pay.
     ///
     /// Key times sit on a grid of the span, so a frame's key depends only on the frame.
     pub(super) fn plan(time: f32, view: [f32; 4], field: [u32; 2]) -> Option<Self> {
-        let reach = reach(view)?;
-        let span = if reach > MAX_MARGIN { SPAN * MAX_MARGIN / reach } else { SPAN };
-        if span < MIN_SPAN {
-            return None;
-        }
-        // three texels more for the interpolation's footprint
-        let margin: [f32; 2] = std::array::from_fn(|axis| reach.min(MAX_MARGIN) + 3.0 / field[axis] as f32);
-        let size = [view[2] - view[0], view[3] - view[1]];
+        Self::around(time, view, view, field)
+    }
+
+    /// As `plan`, for a view on its way to `heading`: the key spans both.
+    fn around(time: f32, view: [f32; 4], heading: [f32; 4], field: [u32; 2]) -> Option<Self> {
+        let (span, margin) = terms(view, field)?;
+        let size = extent(view);
+        let by = [margin[0] * size[0], margin[1] * size[1]];
+        // a heading that takes the key to the horizon is left out: nothing can be traced there
+        let both = Some(grown(joined(view, heading), by)).filter(|&all| reach(all).is_some());
+        let bounds = both.unwrap_or_else(|| grown(view, by));
+        let across = extent(bounds);
         Some(Self {
             time: (time / span).floor() * span,
             span,
-            view: [
-                view[0] - margin[0] * size[0],
-                view[1] - margin[1] * size[1],
-                view[2] + margin[0] * size[0],
-                view[3] + margin[1] * size[1],
-            ],
-            size: std::array::from_fn(|axis| (field[axis] as f32 * 2.0f32.mul_add(margin[axis], 1.0)).ceil() as u32),
+            view: bounds,
+            size: std::array::from_fn(|axis| (field[axis] as f32 * across[axis] / size[axis]).ceil() as u32),
+            detail: field[0] as f32 / size[0],
         })
     }
 
@@ -161,8 +209,23 @@ impl Key {
     }
 
     /// Whether a frame at `time` falls in the stretch this key serves.
-    pub(super) fn serves(&self, time: f32) -> bool {
+    #[cfg(test)]
+    fn serves(&self, time: f32) -> bool {
         time >= self.time && time < self.time + self.span
+    }
+
+    /// Whether a frame at `time` can still read this key, at the cost of a longer step back.
+    fn reaches(&self, time: f32) -> bool {
+        time >= self.time && time < 2.0f32.mul_add(self.span, self.time)
+    }
+
+    /// Whether `bounds` lies within the key, give or take a texel.
+    fn holds(&self, bounds: [f32; 4]) -> bool {
+        let slack = (self.view[2] - self.view[0]) / self.size[0] as f32;
+        bounds[0] >= self.view[0] - slack
+            && bounds[1] >= self.view[1] - slack
+            && bounds[2] <= self.view[2] + slack
+            && bounds[3] <= self.view[3] + slack
     }
 }
 
@@ -183,20 +246,37 @@ impl Slice {
     }
 }
 
+/// A key being rendered to take over from the one held.
+#[derive(Clone, Copy)]
+struct Coming {
+    key: Key,
+    /// Stripes rendered so far.
+    done: u32,
+    /// Whether it is carried forward from the key held, not traced afresh.
+    carried: bool,
+    /// Frames it is spread over when the picture is waiting on it; zero for a successor
+    /// prepared ahead of its time.
+    frames: u32,
+}
+
 /// The key frames read now and the one being rendered to follow it, each in its own texture.
+///
+/// Keys span part of the cover, not the screen, so a key outlives changes of view. One the
+/// view is leaving is refitted: carried into a key around where the view is heading, in a few
+/// frames. One the view has closed in on has too little detail, and is traced afresh once the
+/// view rests.
 #[derive(Default)]
 pub(super) struct Keys {
     held: Option<Key>,
     slot: usize,
-    /// The successor and how many of its stripes are rendered.
-    coming: Option<(Key, u32)>,
+    coming: Option<Coming>,
+    busy: bool,
 }
 
 impl Keys {
     /// Drops both keys: the next frame does not continue the last.
     pub(super) fn clear(&mut self) {
-        self.held = None;
-        self.coming = None;
+        *self = Self { slot: self.slot, ..Self::default() };
     }
 
     /// The key to read and the texture it is in.
@@ -204,42 +284,89 @@ impl Keys {
         self.held.map(|key| (self.slot, key))
     }
 
-    /// Moves on to a frame at `time`, `dt` after the last one, and returns the stripes to render
-    /// before it is drawn: a whole key when none is ready, otherwise the next few stripes of
-    /// the successor.
-    pub(super) fn advance(&mut self, time: f32, dt: f32, view: [f32; 4], field: [u32; 2]) -> Option<Slice> {
-        if !self.held.is_some_and(|key| key.serves(time)) {
-            // a key that has run out goes on serving while its successor is finished, which
-            // costs its frames a longer step back but never a whole key in one frame
-            let overdue = self.held.is_some_and(|key| time >= key.time && time < 2.0f32.mul_add(key.span, key.time));
-            match self.coming {
-                Some((key, done)) if key.serves(time) && done == STRIPES => {
-                    self.slot ^= 1;
-                    self.held = Some(key);
-                    self.coming = None;
-                },
-                Some((key, _)) if key.serves(time) && overdue => {},
-                _ => {
-                    self.coming = None;
-                    self.held = Key::plan(time, view, field);
-                    return self.held.map(|key| Slice { slot: self.slot, key, from: None, stripes: 0..STRIPES });
-                },
-            }
+    /// Whether drawing the same frame again would bring a better key closer.
+    pub(super) const fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Moves on to a frame at `time`, `dt` after the last one, whose `view` changed by `drift`
+    /// since then, and returns the stripes to render before it is drawn: a whole key when none
+    /// can be read, otherwise the next few stripes of the one coming.
+    pub(super) fn advance(
+        &mut self,
+        time: f32,
+        dt: f32,
+        view: [f32; 4],
+        drift: [f32; 4],
+        field: [u32; 2],
+    ) -> Option<Slice> {
+        self.busy = false;
+        let Some(wanted) = Key::plan(time, view, field) else {
+            self.clear();
+            return None;
+        };
+        if let Some(coming) = self.coming.filter(|coming| coming.done == STRIPES && coming.key.time <= time) {
+            self.slot ^= 1;
+            self.held = Some(coming.key);
+            self.coming = None;
         }
-        let held = self.held?;
+        let heading = ahead(view, drift, PLAN_LEAD);
+        let Some(held) = self.held.filter(|key| key.reaches(time)) else {
+            self.coming = None;
+            self.held = Key::around(time, view, heading, field);
+            return self.held.map(|key| Slice { slot: self.slot, key, from: None, stripes: 0..STRIPES });
+        };
+
+        let size = extent(view);
+        let margin =
+            [0.5 * (wanted.view[2] - wanted.view[0] - size[0]), 0.5 * (wanted.view[3] - wanted.view[1] - size[1])];
+        // half the margin is enough to be going on with, which keeps a slow pan from refitting every frame
+        let needed = grown(joined(view, ahead(view, drift, CHECK_LEAD)), margin.map(|m| 0.5 * m));
+        let leaving = !held.holds(needed);
+        let still = drift.iter().all(|&edge| edge == 0.0);
+        let soft = held.detail < SOFT * wanted.detail;
+        // a successor prepared ahead gives way to a key the picture is waiting on, and a
+        // fresh trace is put off while the view is still changing
+        if self.coming.is_some_and(|coming| {
+            if coming.frames == 0 { leaving || (soft && still) } else { !coming.carried && !still }
+        }) {
+            self.coming = None;
+        }
         if self.coming.is_none() {
-            let after = Key::plan(1.5f32.mul_add(held.span, held.time), view, field);
-            self.coming = after.filter(|key| key.time > held.time).map(|key| (key, 0));
+            self.coming = if leaving {
+                let key = Key::around(time, view, heading, field);
+                key.map(|key| Coming {
+                    key: Key { time: key.time.max(held.time), detail: key.detail.min(held.detail), ..key },
+                    done: 0,
+                    carried: true,
+                    frames: REFIT_FRAMES,
+                })
+            } else if soft && still {
+                Some(Coming { key: wanted, done: 0, carried: false, frames: RETRACE_FRAMES })
+            } else {
+                Key::around(1.5f32.mul_add(held.span, held.time), view, heading, field)
+                    .filter(|key| key.time > held.time)
+                    .map(|key| Coming {
+                        key: Key { detail: key.detail.min(held.detail), ..key },
+                        done: 0,
+                        carried: true,
+                        frames: 0,
+                    })
+            };
         }
-        let (key, done) = self.coming.as_mut()?;
-        let left = STRIPES - *done;
-        if left == 0 || dt <= 0.0 {
+        let coming = self.coming.as_mut()?;
+        self.busy = coming.frames > 0 || leaving || soft;
+        let left = STRIPES - coming.done;
+        let span = held.span.min(coming.key.span);
+        let paced = if dt > 0.0 { (STRIPES as f32 * dt / (PREPARE * span)).ceil() as u32 } else { 0 };
+        let hurried = if coming.frames > 0 { STRIPES.div_ceil(coming.frames) } else { 0 };
+        let stripes = paced.max(hurried).min(left);
+        if stripes == 0 {
             return None;
         }
-        let stripes = ((STRIPES as f32 * dt / (PREPARE * held.span)).ceil() as u32).clamp(1, left);
-        let range = *done..*done + stripes;
-        *done += stripes;
-        Some(Slice { slot: self.slot ^ 1, key: *key, from: Some(held), stripes: range })
+        let range = coming.done..coming.done + stripes;
+        coming.done += stripes;
+        Some(Slice { slot: self.slot ^ 1, key: coming.key, from: coming.carried.then_some(held), stripes: range })
     }
 }
 
@@ -252,6 +379,7 @@ mod tests {
     use crate::shaders::Sources;
 
     const FULL: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+    const STILL: [f32; 4] = [0.0; 4];
 
     #[rstest]
     #[case("HA", HA)]
@@ -313,7 +441,7 @@ mod tests {
         const FIELD: [u32; 2] = [800, 800];
         let dt = 0.4 / 60.0;
         let mut keys = Keys::default();
-        assert!(let Some(first) = keys.advance(7.0, dt, FULL, FIELD));
+        assert!(let Some(first) = keys.advance(7.0, dt, FULL, STILL, FIELD));
         check!(first.stripes == (0..STRIPES) && first.is_heavy() && first.from == None);
         assert!(let Some((slot, held)) = keys.held());
         check!((first.slot, first.key) == (slot, held));
@@ -321,7 +449,7 @@ mod tests {
         let mut done = 0;
         let mut frame = 1;
         while keys.held().is_some_and(|(_, key)| key == held) {
-            let slice = keys.advance(dt.mul_add(frame as f32, 7.0), dt, FULL, FIELD);
+            let slice = keys.advance(dt.mul_add(frame as f32, 7.0), dt, FULL, STILL, FIELD);
             if let Some(slice) = slice.filter(|_| keys.held().is_some_and(|(_, key)| key == held)) {
                 check!(slice.slot != slot && slice.stripes.start == done && !slice.is_heavy());
                 check!(slice.from == Some(held));
@@ -336,10 +464,53 @@ mod tests {
     #[test]
     fn a_frame_far_ahead_gets_a_whole_new_key() {
         let mut keys = Keys::default();
-        keys.advance(7.0, 0.01, FULL, [800, 800]);
-        keys.advance(7.01, 0.01, FULL, [800, 800]);
-        assert!(let Some(slice) = keys.advance(20.0, 12.99, FULL, [800, 800]));
+        keys.advance(7.0, 0.01, FULL, STILL, [800, 800]);
+        keys.advance(7.01, 0.01, FULL, STILL, [800, 800]);
+        assert!(let Some(slice) = keys.advance(20.0, 12.99, FULL, STILL, [800, 800]));
         check!(slice.stripes == (0..STRIPES) && slice.key.serves(20.0));
+    }
+
+    /// Runs `frames` frames from time 7, the view moving by `drift` each frame from `view`, and
+    /// returns the slices rendered and the view the run ends on.
+    fn run(keys: &mut Keys, view: [f32; 4], drift: [f32; 4], dt: f32, frames: u32) -> (Vec<Slice>, [f32; 4]) {
+        const FIELD: [u32; 2] = [800, 800];
+        let mut at = view;
+        let slices = (0..frames)
+            .filter_map(|frame| {
+                let moved = if frame == 0 { STILL } else { drift };
+                at = std::array::from_fn(|i| at[i] + moved[i]);
+                keys.advance(dt.mul_add(frame as f32, 7.0), dt, at, moved, FIELD)
+            })
+            .collect();
+        (slices, at)
+    }
+
+    #[rstest]
+    #[case::running(0.4 / 60.0)]
+    #[case::paused(0.0)]
+    fn a_panning_view_keeps_its_key_and_refits_it_ahead_of_the_view(#[case] dt: f32) {
+        let start = [0.3, 0.3, 0.6, 0.6];
+        let pan = [0.004, 0.0, 0.004, 0.0];
+        let mut keys = Keys::default();
+        let (slices, view) = run(&mut keys, start, pan, dt, 60);
+        check!(slices[0].from == None && slices[0].is_heavy());
+        // every key after the first is carried from the one before, a few stripes a frame
+        check!(slices[1..].iter().all(|slice| slice.from.is_some() && !slice.is_heavy()));
+        assert!(let Some((_, held)) = keys.held());
+        check!(held.holds(view) && held.view[2] > slices[0].key.view[2]);
+    }
+
+    #[test]
+    fn a_view_that_closed_in_is_traced_afresh_once_it_rests() {
+        let mut keys = Keys::default();
+        let (_, view) = run(&mut keys, [0.2, 0.2, 0.8, 0.8], [0.004, 0.004, -0.004, -0.004], 0.4 / 60.0, 30);
+        assert!(let Some((_, soft)) = keys.held());
+        check!(keys.busy());
+        let (slices, _) = run(&mut keys, view, STILL, 0.0, 40);
+        assert!(let Some((_, held)) = keys.held());
+        check!(held.detail > 1.2 * soft.detail && !keys.busy());
+        check!(slices.iter().all(|slice| !slice.is_heavy()));
+        check!(slices.iter().any(|slice| slice.from.is_none()));
     }
 
     #[test]
