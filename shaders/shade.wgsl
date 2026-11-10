@@ -43,12 +43,13 @@ const LIGHT3 = vec3f(-0.734, -0.513, -0.445);
 const GRAIN_PERIOD = 0.4;                      // grain refresh period for the moving liquid
 
 // Grain of a fixed physical size (cell in ref px), about unit spread, two octaves. Zooming
-// magnifies it; fpx (ref px per output px) fades out what is finer than a pixel.
+// magnifies it; fpx (ref px per shaded px) fades out each octave before it nears two
+// displayed pixels per cycle, where it would shimmer as it drifts.
 fn grain(p: vec2f, cell: f32, fpx: f32) -> f32 {
     let q = p / cell;
-    let k = fpx / cell;
-    let a = gradient_noise(q).x * (1.0 - smoothstep(0.4, 0.9, k));
-    let b = gradient_noise(q * 2.13 + 7.3).x * 0.55 * (1.0 - smoothstep(0.4, 0.9, 2.13 * k));
+    let k = fpx * u.field_scale / cell;
+    let a = gradient_noise(q).x * (1.0 - smoothstep(0.4, 0.625, k));
+    let b = gradient_noise(q * 2.13 + 7.3).x * 0.55 * (1.0 - smoothstep(0.4, 0.625, 2.13 * k));
     return (a + b) * 4.4;
 }
 
@@ -314,8 +315,10 @@ fn spray_fade(col_in: vec3f, pix: Pixel) -> vec3f {
     if (fd < 0.999 && c >= 0.0) {
         let cpp = px / glen;   // output px per stripe period
         let mq = vec2f(m, c);
-        let vis1 = smoothstep(1.0, 3.0, cpp / 2.6);
-        let vis2 = smoothstep(1.0, 3.0, cpp / 5.7);
+        // mottle octaves fade out by the displayed pixels per cycle, as the grain does
+        let dpp = cpp / u.field_scale;
+        let vis1 = smoothstep(1.6, 2.5, dpp / 2.6);
+        let vis2 = smoothstep(1.6, 2.5, dpp / 5.7);
         let big = gradient_noise(mq * 0.13 + 2.0).x * 3.0 + gradient_noise(mq * 0.45 - 7.0).x * 1.5;
         let sp = (gradient_noise(mq * 2.6 + 11.0).x * vis1 + 0.7 * gradient_noise(mq * 5.7 - 3.0).x * vis2) * 3.4 + 0.5 * gfine;
         let fe = fd + (0.055 + P(P_SPRAY_MOTTLE)) * big;
