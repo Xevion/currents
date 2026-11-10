@@ -1,10 +1,7 @@
+// `sample_field(p)`, the field filtered at a shade-pixel position, is appended by the renderer
+// in the form the device supports.
 @group(0) @binding(1) var field: texture_2d<f32>;
 @group(0) @binding(2) var smp: sampler;
-
-// Field at a shade-pixel position, filtered between its coarser texels.
-fn sample_field(p: vec2f) -> vec4f {
-    return textureSampleLevel(field, smp, p / (u.field_scale * vec2f(textureDimensions(field))), 0.0);
-}
 
 fn blob(d: vec2f, amp: f32, c: vec2f, rot: vec2f, inv: vec2f) -> f32 {
     let q = d - c;
@@ -102,17 +99,17 @@ struct Band {
     density: f32,
 }
 
-fn band_at(c: f32, gl: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
+fn band_at(c: f32, glen: f32, gh: vec2f, m: f32, px: f32, rough: f32) -> Band {
     var o: Band;
     let k = floor(c);
     let f = c - k;
     let duty = DUTY + (0.05 + P(P_BAND_WIDTH_JITTER)) * (value_noise(vec2f(m * 0.35, k * 3.7)) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
     let lo = 1.0 - duty;
-    let w = duty / gl;
+    let w = duty / glen;
     // distances (ref px) to the band's low and high edges; negative outside the band
-    let a_lo = (f - lo) / gl;
-    let a_hi = select((1.0 - f) / gl, -f / gl, f < lo);
-    let dd = select(min(a_lo, a_hi), -min(lo - f, f) / gl, f < lo);
+    let a_lo = (f - lo) / glen;
+    let a_hi = select((1.0 - f) / glen, -f / glen, f < lo);
+    let dd = select(min(a_lo, a_hi), -min(lo - f, f) / glen, f < lo);
     o.coverage = clamp((dd + rough) * px + 0.5, 0.0, 1.0);
     // the high edge faces +grad c; light it when that faces the light
     let e = clamp(dot(gh, LIGHT) / 0.35, -1.0, 1.0);
@@ -166,8 +163,8 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     let s_down = rel.x / scn.radius;
     let rr = length(rel) / scn.radius;
     let gs = vec2f(fxp.r - fxm.r, fyp.r - fym.r) * (0.5 / fo) * px;
-    let gl = max(length(gs), 1e-5);
-    let gh = gs / gl;
+    let glen = max(length(gs), 1e-5);
+    let gh = gs / glen;
 
     let gp = cover * REFPX;
     // grain riding with the liquid: fine speckle plus a coarser clumping
@@ -187,7 +184,7 @@ fn pixel_state(pos: vec2f, scn: Scene) -> Pixel {
     pix.field_step = fo;
     pix.line = c;
     pix.flow_label = m;
-    pix.line_grad_len = gl;
+    pix.line_grad_len = glen;
     pix.line_grad_dir = gh;
     pix.plane_rel = rel;
     pix.obstacle_dist = rr;
@@ -206,7 +203,7 @@ fn stream_color(pix: Pixel) -> vec3f {
     let pos = pix.pos;
     let px = pix.out_px_per_ref;
     let c = pix.line;
-    let gl = pix.line_grad_len;
+    let glen = pix.line_grad_len;
     let rr = pix.obstacle_dist;
     let s_down = pix.obstacle_down;
     let speck = pix.speckle;
@@ -223,9 +220,9 @@ fn stream_color(pix: Pixel) -> vec3f {
     // bands beside the stream stand proud of it and shade it on the side away from the light
     let ls = pos.xy + LIGHT * (2.2 * px);
     let lc = sample_field(ls).r;
-    let shade_by = clamp(lc / gl * px + 0.5, 0.0, 1.0);
+    let shade_by = clamp(lc / glen * px + 0.5, 0.0, 1.0);
     sc *= 1.0 - 0.4 * shade_by;
-    let cov = clamp((-c / gl + rough) * px + 0.5, 0.0, 1.0);
+    let cov = clamp((-c / glen + rough) * px + 0.5, 0.0, 1.0);
     return mix(black, sc, cov);
 }
 
@@ -235,7 +232,7 @@ fn band_color(pix: Pixel) -> vec3f {
     let fpx = pix.ref_px_per_out;
     let c = pix.line;
     let m = pix.flow_label;
-    let gl = pix.line_grad_len;
+    let glen = pix.line_grad_len;
     let gh = pix.line_grad_dir;
     let gfine = pix.grain_fine;
     let gclump = pix.grain_clump;
@@ -243,7 +240,7 @@ fn band_color(pix: Pixel) -> vec3f {
     let rough = pix.edge_rough;
     let black = pix.black;
     var col = black;
-    let b = band_at(c, gl, gh, m, px, rough);
+    let b = band_at(c, glen, gh, m, px, rough);
     if (b.coverage > 0.0) {
         // speckle where the grain beats the local density; soft edges when minified
         let thr = (0.5 - b.density) * 2.6;
@@ -253,7 +250,7 @@ fn band_color(pix: Pixel) -> vec3f {
         col = mix(black, lilac(t), b.coverage);
     }
     // stripes too fine for the pixels settle to their average instead of beating
-    let per_px = px / gl;
+    let per_px = px / glen;
     col = mix(col, mix(black, lilac(0.5), DUTY), smoothstep(3.5, 1.6, per_px));
     return col;
 }
@@ -308,14 +305,14 @@ fn spray_fade(col_in: vec3f, pix: Pixel) -> vec3f {
     let px = pix.out_px_per_ref;
     let c = pix.line;
     let m = pix.flow_label;
-    let gl = pix.line_grad_len;
+    let glen = pix.line_grad_len;
     let gfine = pix.grain_fine;
     let black = pix.black;
     var col = col_in;
     let fs = 0.45 * cover.x - 0.89 * cover.y - 0.22 * (cover.x - 0.6) * (cover.x - 0.6);
     let fd = 1.0 - smoothstep(-0.14, 0.4, fs);
     if (fd < 0.999 && c >= 0.0) {
-        let cpp = px / gl;   // output px per stripe period
+        let cpp = px / glen;   // output px per stripe period
         let mq = vec2f(m, c);
         let vis1 = smoothstep(1.0, 3.0, cpp / 2.6);
         let vis2 = smoothstep(1.0, 3.0, cpp / 5.7);
@@ -445,7 +442,9 @@ struct Mirror {
 }
 
 // The liquid mirrored in the chrome. The surface is not perfect: a slow waviness bends
-// the image and its roughness blurs it, more toward the rim.
+// the image and its roughness blurs it, more toward the rim. Its derivatives are only off in
+// quads straddling the caller's disc_r < 1.02 test, which lies beyond the ball's painted edge.
+@diagnostic(off, derivative_uniformity)
 fn liquid_reflection(pix: Pixel, scn: Scene, ball: Ball, surf: BallSurface) -> Mirror {
     let fo = pix.field_step;
     let d2 = ball.disc;
@@ -511,7 +510,7 @@ fn add_bounced_light(scol2_in: vec3f, g: f32, pix: Pixel, scn: Scene, mir: Mirro
         let band_avg = mix(black, lilac(0.55), DUTY);
         var acc = vec3f(0.0);
         for (var k = 0; k < 5; k++) {
-            let o = select(vec2f(f32(k & 1) * 2.0 - 1.0, f32(k >> 1u & 1) * 2.0 - 1.0), vec2f(0.0), k == 4);
+            let o = select(vec2f(f32(k & 1) * 2.0 - 1.0, f32((k >> 1u) & 1) * 2.0 - 1.0), vec2f(0.0), k == 4);
             let cc = sample_field(clamp(bpos + o * spread, vec2f(fo), u.resolution - fo)).r;
             acc += mix(rgb255(236.0, 56.0, 80.0), band_avg, smoothstep(-0.3, 0.3, cc));
         }
@@ -528,19 +527,19 @@ fn composite_ball(col_in: vec3f, scol2_in: vec3f, pix: Pixel, ball: Ball) -> vec
     let px = pix.out_px_per_ref;
     let c = pix.line;
     let m = pix.flow_label;
-    let gl = pix.line_grad_len;
+    let glen = pix.line_grad_len;
     let gh = pix.line_grad_dir;
     let rel = pix.plane_rel;
     let d2 = ball.disc;
     let rd2 = ball.disc_r;
     var col = col_in;
     var scol2 = scol2_in;
-    let liquid = clamp(c / gl * px + 0.5, 0.0, 1.0);          // 1 on bands and gaps, 0 on the stream
+    let liquid = clamp(c / glen * px + 0.5, 0.0, 1.0);          // 1 on bands and gaps, 0 on the stream
     let near = select(0.0, 1.0, rel.y < 0.0);
     let low = smoothstep(0.5, 0.56, d2.y - 0.25 * d2.x);     // far-side bands rejoin in front low on the right
     let front = liquid * max(near, low);
 
-    let wl = c / gl;                                         // ref px from the waterline, + on the liquid
+    let wl = c / glen;                                         // ref px from the waterline, + on the liquid
     let side = max(near, low) * smoothstep(1.0, 0.96, rd2);
     scol2 *= 1.0 - 0.45 * side * exp(min(wl, 0.0) / 3.5);
     var cov = clamp((1.0 - rd2) * BALL_R * opx + 0.5, 0.0, 1.0) * (1.0 - front);

@@ -5,7 +5,7 @@ use snafu::{ResultExt, Snafu};
 
 /// A rectangle in cover coordinates, where the cover square is `0..1` on both axes.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct View {
+pub struct View {
     x0: f32,
     y0: f32,
     x1: f32,
@@ -39,35 +39,35 @@ impl View {
     }
 
     /// The rectangle `half` extents away from `centre` on each side.
-    pub(crate) fn from_centre(centre: [f32; 2], half: [f32; 2]) -> Self {
+    pub fn from_centre(centre: [f32; 2], half: [f32; 2]) -> Self {
         Self::new(centre[0] - half[0], centre[1] - half[1], centre[0] + half[0], centre[1] + half[1])
     }
 
-    pub(crate) fn width(self) -> f32 {
+    pub fn width(self) -> f32 {
         self.x1 - self.x0
     }
 
-    pub(crate) fn height(self) -> f32 {
+    pub fn height(self) -> f32 {
         self.y1 - self.y0
     }
 
-    pub(crate) fn aspect(self) -> f32 {
+    pub fn aspect(self) -> f32 {
         self.width() / self.height()
     }
 
     /// Left and top edge, in cover coordinates.
-    pub(crate) fn origin(self) -> [f32; 2] {
+    pub fn origin(self) -> [f32; 2] {
         [self.x0, self.y0]
     }
 
     /// The `[x0, y0, x1, y1]` layout the shaders read.
-    pub(crate) fn to_array(self) -> [f32; 4] {
+    pub fn to_array(self) -> [f32; 4] {
         [self.x0, self.y0, self.x1, self.y1]
     }
 }
 
 #[derive(Debug, Snafu)]
-pub(crate) enum Error {
+pub enum Error {
     #[snafu(display("expected a view name or x0,y0,x1,y1"))]
     Shape,
     #[snafu(display("`{part}` is not a number: {source}"))]

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use web_time::Instant;
 
 use crate::renderer::PassTimes;
 
@@ -6,18 +6,18 @@ use crate::renderer::PassTimes;
 const TITLE_INTERVAL: f32 = 0.5;
 
 /// Counts frames and produces the window title text once per interval.
-pub(super) struct FrameCounter {
+pub(crate) struct FrameCounter {
     frames: u32,
     since: Instant,
 }
 
 impl FrameCounter {
-    pub(super) fn new(now: Instant) -> Self {
+    pub(crate) fn new(now: Instant) -> Self {
         Self { frames: 0, since: now }
     }
 
     /// Counts one frame drawn at `now`; returns the title when the interval has elapsed.
-    pub(super) fn tick(&mut self, now: Instant, passes: PassTimes, time: f32, paused: bool) -> Option<String> {
+    pub(crate) fn tick(&mut self, now: Instant, passes: PassTimes, time: f32, paused: bool) -> Option<String> {
         self.frames += 1;
         let dt = (now - self.since).as_secs_f32();
         if dt <= TITLE_INTERVAL {

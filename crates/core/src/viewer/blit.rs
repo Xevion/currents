@@ -2,7 +2,7 @@ use crate::gpu::linear_sampler;
 use crate::renderer::draw_fullscreen;
 
 /// Scales the renderer's colour texture onto the window's surface.
-pub(super) struct Blit {
+pub(crate) struct Blit {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     bind: Option<wgpu::BindGroup>,
@@ -10,7 +10,7 @@ pub(super) struct Blit {
 
 impl Blit {
     /// `supersampling` is the colour texture's size in texels per surface pixel along each axis.
-    pub(super) fn new(device: &wgpu::Device, target: wgpu::TextureFormat, supersampling: u32) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, target: wgpu::TextureFormat, supersampling: u32) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit"),
             source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
@@ -44,7 +44,7 @@ impl Blit {
     }
 
     /// Points the blit at `source`; call again whenever the texture behind the view is replaced.
-    pub(super) fn bind(&mut self, device: &wgpu::Device, source: &wgpu::TextureView) {
+    pub(crate) fn bind(&mut self, device: &wgpu::Device, source: &wgpu::TextureView) {
         self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.pipeline.get_bind_group_layout(0),
@@ -55,7 +55,7 @@ impl Blit {
         }));
     }
 
-    pub(super) fn draw(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+    pub(crate) fn draw(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let bind = self.bind.as_ref().expect("blit drawn before being bound to a source");
         draw_fullscreen(enc, target, &self.pipeline, bind, None);
     }
@@ -63,10 +63,11 @@ impl Blit {
 
 #[cfg(test)]
 mod tests {
-    use crate::shader_check::validate;
+    use crate::shader_check::{to_webgl, validate};
 
     #[test]
-    fn blit_shader_validates() {
+    fn blit_shader_validates_and_translates_for_webgl() {
         validate("blit", include_str!("blit.wgsl"));
+        to_webgl("blit", include_str!("blit.wgsl"), &[("scale", 1.0), ("to_linear", 0.0)]);
     }
 }

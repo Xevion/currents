@@ -1,30 +1,34 @@
-use std::path::Path;
-
-use snafu::ResultExt;
-use tracing::debug;
-
-use super::{Error, ReadShaderSnafu};
-
 pub(super) struct Pass {
     pub(super) pipeline: wgpu::RenderPipeline,
     pub(super) layout: wgpu::BindGroupLayout,
 }
 
+/// How a pass reads its input textures.
+#[derive(Clone, Copy)]
+pub(super) struct Inputs {
+    pub(super) count: u32,
+    /// Whether the textures are sampled with filtering; otherwise they are bound as
+    /// unfilterable, alongside a non-filtering sampler.
+    pub(super) filterable: bool,
+}
+
+impl Inputs {
+    pub(super) const NONE: Self = Self { count: 0, filterable: true };
+}
+
 impl Pass {
-    /// Builds the pipeline for `dir/name.wgsl` appended to `common`, with a uniform buffer and
-    /// `inputs` filterable textures (plus their sampler) bound in group 0.
+    /// Builds the pipeline for `source` with a uniform buffer and `inputs` textures (plus their
+    /// sampler) bound in group 0.
     pub(super) fn new(
         device: &wgpu::Device,
-        common: &str,
-        dir: &Path,
         name: &str,
-        inputs: u32,
+        source: String,
+        inputs: Inputs,
         format: wgpu::TextureFormat,
-    ) -> Result<Self, Error> {
-        let src = read_shader(&dir.join(format!("{name}.wgsl")))?;
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),
-            source: wgpu::ShaderSource::Wgsl(assemble(common, &src).into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let mut entries = vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -36,21 +40,26 @@ impl Pass {
             },
             count: None,
         }];
-        entries.extend((0..inputs).map(|i| wgpu::BindGroupLayoutEntry {
+        entries.extend((0..inputs.count).map(|i| wgpu::BindGroupLayoutEntry {
             binding: i + 1,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                sample_type: wgpu::TextureSampleType::Float { filterable: inputs.filterable },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
             count: None,
         }));
-        if inputs > 0 {
+        if inputs.count > 0 {
+            let sampler = if inputs.filterable {
+                wgpu::SamplerBindingType::Filtering
+            } else {
+                wgpu::SamplerBindingType::NonFiltering
+            };
             entries.push(wgpu::BindGroupLayoutEntry {
-                binding: inputs + 1,
+                binding: inputs.count + 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(sampler),
                 count: None,
             });
         }
@@ -82,19 +91,8 @@ impl Pass {
             multiview_mask: None,
             cache: None,
         });
-        Ok(Self { pipeline, layout })
+        Self { pipeline, layout }
     }
-}
-
-/// The source a pass is compiled from: the shared declarations followed by the pass itself.
-fn assemble(common: &str, pass: &str) -> String {
-    format!("{common}\n{pass}")
-}
-
-pub(super) fn read_shader(path: &Path) -> Result<String, Error> {
-    let src = std::fs::read_to_string(path).context(ReadShaderSnafu { path })?;
-    debug!(path = %path.display(), bytes = src.len(), "loaded shader");
-    Ok(src)
 }
 
 /// Clears `target` to black, then draws one fullscreen triangle with `pipeline` and `bind`.
@@ -119,22 +117,4 @@ pub(crate) fn draw_fullscreen(
     rp.set_pipeline(pipeline);
     rp.set_bind_group(0, bind, &[]);
     rp.draw(0..3, 0..1);
-}
-
-#[cfg(test)]
-mod tests {
-    use rstest::rstest;
-
-    use super::*;
-    use crate::shader_check::validate;
-
-    #[rstest]
-    #[case("field")]
-    #[case("shade")]
-    fn pass_shaders_validate(#[case] name: &str) {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        let common = read_shader(&dir.join("common.wgsl")).unwrap();
-        let pass = read_shader(&dir.join(format!("{name}.wgsl"))).unwrap();
-        validate(name, &assemble(&common, &pass));
-    }
 }

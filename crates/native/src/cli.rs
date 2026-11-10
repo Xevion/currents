@@ -1,13 +1,13 @@
-mod param;
 mod size;
-mod view;
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use param::{PARAM_SLOTS, ParamOverride};
+pub(crate) use currents_core::View;
+use currents_core::shaders::{self, Sources};
+use currents_core::viewer::Settings;
+use currents_core::{ParamBlock, ParamOverride};
 pub(crate) use size::OutputSize;
-pub(crate) use view::View;
 
 /// Live rendering of the Currents cover. With no subcommand, opens the interactive viewer
 /// (scroll to zoom at the cursor, drag to pan, space to pause, R to reset, Esc to quit).
@@ -37,13 +37,28 @@ pub(crate) struct Common {
 
 impl Common {
     /// The overrides packed into the shaders' parameter block.
-    pub(crate) fn param_array(&self) -> [[f32; 4]; PARAM_SLOTS / 4] {
+    pub(crate) fn param_array(&self) -> ParamBlock {
         ParamOverride::pack(&self.params)
     }
 
     /// Supersampling factor per axis, never below one.
     pub(crate) fn supersampling(&self) -> u32 {
         self.ss.max(1)
+    }
+
+    pub(crate) fn sources(&self) -> Result<Sources, shaders::Error> {
+        Sources::from_dir(&self.shaders)
+    }
+
+    /// The viewer setup: every window pixel rendered, with the shaders read from disk.
+    pub(crate) fn settings(&self) -> Result<Settings, shaders::Error> {
+        Ok(Settings {
+            sources: self.sources()?,
+            speed: self.speed,
+            supersampling: self.supersampling(),
+            params: self.param_array(),
+            budget: None,
+        })
     }
 }
 

@@ -5,9 +5,9 @@ const PASSES: u32 = 2;
 
 /// GPU time spent in each pass of one frame, in milliseconds.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct PassTimes {
-    pub(crate) field: f32,
-    pub(crate) shade: f32,
+pub struct PassTimes {
+    pub field: f32,
+    pub shade: f32,
 }
 
 /// GPU timestamps around each pass, read back without stalling: a frame's stamps are copied

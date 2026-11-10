@@ -1,35 +1,27 @@
 mod pass;
 mod timing;
 
-use std::io;
-use std::path::{Path, PathBuf};
-
 pub(crate) use pass::draw_fullscreen;
-use pass::{Pass, read_shader};
-use snafu::Snafu;
-pub(crate) use timing::PassTimes;
+use pass::{Inputs, Pass};
+pub use timing::PassTimes;
 use timing::Timing;
 
 use crate::gpu::linear_sampler;
-
-#[derive(Debug, Snafu)]
-pub(crate) enum Error {
-    #[snafu(display("could not read shader {}", path.display()))]
-    ReadShader { path: PathBuf, source: io::Error },
-}
+use crate::params::ParamBlock;
+use crate::shaders::Sources;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct Uniforms {
-    pub(crate) resolution: [f32; 2],
-    pub(crate) time: f32,
+pub struct Uniforms {
+    pub resolution: [f32; 2],
+    pub time: f32,
     /// Shade pixels per field texel along each axis.
-    pub(crate) field_scale: f32,
-    pub(crate) view: [f32; 4],
-    pub(crate) params: [[f32; 4]; 8],
+    pub field_scale: f32,
+    pub view: [f32; 4],
+    pub params: ParamBlock,
 }
 
-const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+pub(crate) const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Shade resolution in pixels and the supersampling factor; the field texture is derived from both.
@@ -50,13 +42,21 @@ struct Targets {
 }
 
 /// Two fullscreen passes: `field` writes the stripe coordinate, `shade` turns it into colour.
-pub(crate) struct Renderer {
+pub struct Renderer {
     ubuf: wgpu::Buffer,
     field: Pass,
     shade: Pass,
     targets: Option<Targets>,
     sampler: wgpu::Sampler,
     timing: Option<Timing>,
+}
+
+/// The shade pass with the `sample_field` the device can run appended. The two are separate
+/// sources because even a constant branch between them changes the driver's codegen.
+fn shade_source(sources: &Sources, filterable: bool) -> String {
+    let sampler =
+        if filterable { include_str!("sample_filtered.wgsl") } else { include_str!("sample_unfiltered.wgsl") };
+    sources.assemble(&format!("{}\n{sampler}", sources.shade))
 }
 
 fn make_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -75,26 +75,33 @@ fn make_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) 
 }
 
 impl Renderer {
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, shader_dir: &Path) -> Result<Self, Error> {
-        let common = read_shader(&shader_dir.join("common.wgsl"))?;
+    /// Without `FLOAT32_FILTERABLE` (common on WebGL and phones) the shade pass filters the field itself.
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, sources: &Sources) -> Self {
+        let filterable = device.features().contains(wgpu::Features::FLOAT32_FILTERABLE);
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Ok(Self {
-            ubuf,
-            field: Pass::new(device, &common, shader_dir, "field", 0, FIELD_FORMAT)?,
-            shade: Pass::new(device, &common, shader_dir, "shade", 1, COLOR_FORMAT)?,
-            targets: None,
-            sampler: linear_sampler(device),
-            timing: Timing::new(device, queue),
-        })
+        let field = Pass::new(device, "field", sources.assemble(&sources.field), Inputs::NONE, FIELD_FORMAT);
+        let shade = Pass::new(
+            device,
+            "shade",
+            shade_source(sources, filterable),
+            Inputs { count: 1, filterable },
+            COLOR_FORMAT,
+        );
+        let sampler = if filterable {
+            linear_sampler(device)
+        } else {
+            device.create_sampler(&wgpu::SamplerDescriptor::default())
+        };
+        Self { ubuf, field, shade, targets: None, sampler, timing: Timing::new(device, queue) }
     }
 
     /// Call after submitting the encoder passed to `render`: starts reading back its timestamps.
-    pub(crate) fn after_submit(&mut self) {
+    pub fn after_submit(&mut self) {
         if let Some(t) = self.timing.as_mut() {
             t.start_readback();
         }
@@ -102,7 +109,7 @@ impl Renderer {
 
     /// Milliseconds in the field and shade passes of the most recent frame read back. With
     /// `wait`, blocks until the latest submitted readback lands; otherwise never stalls.
-    pub(crate) fn pass_ms(&mut self, device: &wgpu::Device, wait: bool) -> Option<PassTimes> {
+    pub fn pass_ms(&mut self, device: &wgpu::Device, wait: bool) -> Option<PassTimes> {
         self.timing.as_mut()?.latest(device, wait)
     }
 
@@ -136,7 +143,7 @@ impl Renderer {
 
     /// Renders one frame into the internal colour texture; `uniforms.resolution` sets its size.
     /// Returns whether that texture was recreated, so views of `color` taken earlier are stale.
-    pub(crate) fn render(
+    pub fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -160,11 +167,34 @@ impl Renderer {
         rebuilt
     }
 
-    pub(crate) fn color(&self) -> &wgpu::Texture {
+    pub fn color(&self) -> &wgpu::Texture {
         &self.targets.as_ref().expect("colour target requested before the first render").color
     }
 
-    pub(crate) fn color_view(&self) -> &wgpu::TextureView {
+    pub fn color_view(&self) -> &wgpu::TextureView {
         &self.targets.as_ref().expect("colour target requested before the first render").color_view
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::shader_check::{to_webgl, validate};
+
+    #[test]
+    fn field_shader_validates_and_translates_for_webgl() {
+        let sources = Sources::embedded();
+        let source = sources.assemble(&sources.field);
+        validate("field", &source);
+        to_webgl("field", &source, &[]);
+    }
+
+    #[rstest]
+    fn shade_shader_validates_and_translates_for_webgl(#[values(true, false)] filterable: bool) {
+        let source = shade_source(&Sources::embedded(), filterable);
+        validate("shade", &source);
+        to_webgl("shade", &source, &[]);
     }
 }

@@ -1,13 +1,9 @@
 mod cli;
 mod export;
-mod gpu;
-mod renderer;
-#[cfg(test)]
-mod shader_check;
-mod viewer;
 
 use clap::Parser;
 use cli::{Cli, Command};
+use currents_core::{shaders, viewer};
 use snafu::{ResultExt, Snafu};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -19,6 +15,8 @@ enum Error {
     Render { source: export::Error },
     #[snafu(display("the viewer failed"))]
     Viewer { source: viewer::Error },
+    #[snafu(display("could not load the shaders"))]
+    Shaders { source: shaders::Error },
 }
 
 /// Logs to stderr at `warn` unless `RUST_LOG` says otherwise, and takes in the `log` records wgpu emits.
@@ -36,6 +34,6 @@ fn main() -> Result<(), Error> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Render(args)) => export::run(&cli.common, &args).context(RenderSnafu),
-        None => viewer::run(cli.common).context(ViewerSnafu),
+        None => viewer::run(cli.common.settings().context(ShadersSnafu)?).context(ViewerSnafu),
     }
 }

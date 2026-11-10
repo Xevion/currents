@@ -11,9 +11,11 @@ use readback::Readback;
 use reference::Reference;
 use snafu::{ResultExt, Snafu, ensure};
 
+use currents_core::gpu::{self, Gpu};
+use currents_core::renderer::{PassTimes, Renderer, Uniforms};
+use currents_core::shaders;
+
 use crate::cli::{Common, OutputSize, RenderArgs};
-use crate::gpu::{self, Gpu};
-use crate::renderer::{self, PassTimes, Renderer, Uniforms};
 
 const COVER: &str = "references/stills/cover-apple-3000.jpg";
 
@@ -21,8 +23,8 @@ const COVER: &str = "references/stills/cover-apple-3000.jpg";
 pub(crate) enum Error {
     #[snafu(display("could not open a graphics device"))]
     Gpu { source: gpu::Error },
-    #[snafu(display("could not set up the renderer"))]
-    Renderer { source: renderer::Error },
+    #[snafu(display("could not load the shaders"))]
+    Shaders { source: shaders::Error },
     #[snafu(display("an output size of {width}x{height} has no pixels to render"))]
     EmptyOutput { width: u32, height: u32 },
     #[snafu(display("reading the rendered frame back from the GPU failed"))]
@@ -42,9 +44,10 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     let ss = common.supersampling();
     let shaded = size.scaled(ss);
 
+    let sources = common.sources().context(ShadersSnafu)?;
     let instance = wgpu::Instance::default();
-    let Gpu { device, queue, .. } = gpu::request(&instance, None).context(GpuSnafu)?;
-    let mut renderer = Renderer::new(&device, &queue, &common.shaders).context(RendererSnafu)?;
+    let Gpu { device, queue, .. } = pollster::block_on(gpu::request(&instance, None)).context(GpuSnafu)?;
+    let mut renderer = Renderer::new(&device, &queue, &sources);
     let readback = Readback::new(&device, shaded);
     let reference = args.reference.then(|| Reference::open(Path::new(COVER))).transpose()?;
     let mut pass_sum = PassTimes::default();
