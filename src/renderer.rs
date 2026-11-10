@@ -15,7 +15,10 @@ pub struct Uniforms {
 
 /// Device request that turns on GPU timestamps where the adapter has them.
 pub fn device_desc(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
-    wgpu::DeviceDescriptor { required_features: wgpu::Features::FLOAT32_FILTERABLE | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY), ..Default::default() }
+    wgpu::DeviceDescriptor {
+        required_features: wgpu::Features::FLOAT32_FILTERABLE | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
+        ..Default::default()
+    }
 }
 
 const FIELD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
@@ -60,7 +63,14 @@ struct Timing {
 
 const PASSES: u32 = 2;
 
-fn make_pass(device: &wgpu::Device, common: &str, dir: &Path, name: &str, inputs: u32, format: wgpu::TextureFormat) -> Pass {
+fn make_pass(
+    device: &wgpu::Device,
+    common: &str,
+    dir: &Path,
+    name: &str,
+    inputs: u32,
+    format: wgpu::TextureFormat,
+) -> Pass {
     let src = std::fs::read_to_string(dir.join(format!("{name}.wgsl"))).unwrap_or_else(|e| panic!("{name}.wgsl: {e}"));
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(name),
@@ -69,7 +79,11 @@ fn make_pass(device: &wgpu::Device, common: &str, dir: &Path, name: &str, inputs
     let mut entries = vec![wgpu::BindGroupLayoutEntry {
         binding: 0,
         visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }];
     entries.extend((0..inputs).map(|i| wgpu::BindGroupLayoutEntry {
@@ -90,7 +104,8 @@ fn make_pass(device: &wgpu::Device, common: &str, dir: &Path, name: &str, inputs
             count: None,
         });
     }
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries: &entries });
+    let layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries: &entries });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(name),
         bind_group_layouts: &[Some(&layout)],
@@ -99,7 +114,12 @@ fn make_pass(device: &wgpu::Device, common: &str, dir: &Path, name: &str, inputs
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(name),
         layout: Some(&pl),
-        vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
         primitive: Default::default(),
         depth_stencil: None,
         multisample: Default::default(),
@@ -123,7 +143,9 @@ fn make_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) 
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }
@@ -149,10 +171,19 @@ impl Renderer {
             }),
             timing: device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
                 let buf = |usage| {
-                    device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8 * 2 * PASSES as u64, usage, mapped_at_creation: false })
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: None,
+                        size: 8 * 2 * PASSES as u64,
+                        usage,
+                        mapped_at_creation: false,
+                    })
                 };
                 Timing {
-                    set: device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 * PASSES }),
+                    set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                        label: None,
+                        ty: wgpu::QueryType::Timestamp,
+                        count: 2 * PASSES,
+                    }),
                     resolve: buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
                     read: buf(wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ),
                     period_ns: queue.get_timestamp_period(),
@@ -202,7 +233,8 @@ impl Renderer {
         if self.targets.as_ref().is_some_and(|t| t.size == (w, h, fs)) {
             return;
         }
-        let field_view = make_tex(device, w.div_ceil(fs), h.div_ceil(fs), FIELD_FORMAT).create_view(&Default::default());
+        let field_view =
+            make_tex(device, w.div_ceil(fs), h.div_ceil(fs), FIELD_FORMAT).create_view(&Default::default());
         let color = make_tex(device, w, h, COLOR_FORMAT);
         let color_view = color.create_view(&Default::default());
         let field_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -223,12 +255,22 @@ impl Renderer {
     }
 
     /// Renders one frame into the internal colour texture; `uniforms.resolution` sets its size.
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, uniforms: &Uniforms) {
+    pub fn render(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        enc: &mut wgpu::CommandEncoder,
+        uniforms: &Uniforms,
+    ) {
         let (w, h) = (uniforms.resolution[0] as u32, uniforms.resolution[1] as u32);
         self.ensure_targets(device, w, h, uniforms.field_scale.max(1.0) as u32);
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(uniforms));
         let t = self.targets.as_ref().unwrap();
-        for (i, (pass, bind, view)) in [(&self.field, &t.field_bind, &t.field_view), (&self.shade, &t.shade_bind, &t.color_view)].into_iter().enumerate() {
+        for (i, (pass, bind, view)) in
+            [(&self.field, &t.field_bind, &t.field_view), (&self.shade, &t.shade_bind, &t.color_view)]
+                .into_iter()
+                .enumerate()
+        {
             let i = i as u32;
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 timestamp_writes: self.timing.as_ref().map(|tm| wgpu::RenderPassTimestampWrites {
@@ -241,7 +283,10 @@ impl Renderer {
                     view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 ..Default::default()
             });

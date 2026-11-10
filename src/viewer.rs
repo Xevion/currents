@@ -8,8 +8,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::renderer::{Renderer, Uniforms};
 use crate::Common;
+use crate::renderer::{Renderer, Uniforms};
 
 const BLIT: &str = r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -82,7 +82,12 @@ impl App {
             resolution: [(g.config.width * ss) as f32, (g.config.height * ss) as f32],
             time: self.time,
             field_scale: ss as f32,
-            view: [self.centre[0] - half[0], self.centre[1] - half[1], self.centre[0] + half[0], self.centre[1] + half[1]],
+            view: [
+                self.centre[0] - half[0],
+                self.centre[1] - half[1],
+                self.centre[0] + half[0],
+                self.centre[1] + half[1],
+            ],
             params: self.common.param_array(),
         };
         let frame = match g.surface.get_current_texture() {
@@ -90,7 +95,7 @@ impl App {
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 g.surface.configure(&g.device, &g.config);
                 return;
-            }
+            },
             _ => return,
         };
         let mut enc = g.device.create_command_encoder(&Default::default());
@@ -99,7 +104,10 @@ impl App {
             label: None,
             layout: &g.blit.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(g.renderer.color_view()) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(g.renderer.color_view()),
+                },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&g.sampler) },
             ],
         });
@@ -111,7 +119,10 @@ impl App {
                     view: &view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 ..Default::default()
             });
@@ -154,20 +165,30 @@ impl ApplicationHandler for App {
             ..Default::default()
         }))
         .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&crate::renderer::device_desc(&adapter))).expect("device");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&crate::renderer::device_desc(&adapter))).expect("device");
         let size = window.inner_size();
-        let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
+        let mut config =
+            surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
 
         let src = BLIT
             .replace("SCALE", &format!("{:.1}", self.common.ss.max(1) as f32))
             .replace("TO_LINEAR", if config.format.is_srgb() { "true" } else { "false" });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blit"), source: wgpu::ShaderSource::Wgsl(src.into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
         let blit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blit"),
             layout: None,
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
@@ -199,17 +220,21 @@ impl ApplicationHandler for App {
                     g.config.height = size.height.max(1);
                     g.surface.configure(&g.device, &g.config);
                 }
-            }
+            },
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
-                if self.dragging && let Some(g) = self.gfx.as_ref() {
+                if self.dragging
+                    && let Some(g) = self.gfx.as_ref()
+                {
                     let half = self.half(g);
                     self.centre[0] -= (position.x - self.cursor.x) as f32 / g.config.width as f32 * 2.0 * half[0];
                     self.centre[1] -= (position.y - self.cursor.y) as f32 / g.config.height as f32 * 2.0 * half[1];
                 }
                 self.cursor = position;
-            }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => self.dragging = state == ElementState::Pressed,
+            },
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                self.dragging = state == ElementState::Pressed
+            },
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
@@ -224,17 +249,19 @@ impl ApplicationHandler for App {
                     let after = self.half(g);
                     self.centre = [anchor[0] - ndc[0] * after[0], anchor[1] - ndc[1] * after[1]];
                 }
-            }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => match event.logical_key.as_ref() {
-                Key::Named(NamedKey::Space) => self.paused = !self.paused,
-                Key::Named(NamedKey::Escape) => el.exit(),
-                Key::Character("r") => {
-                    self.centre = [0.5, 0.5];
-                    self.half_height = 0.5;
-                }
-                _ => {}
             },
-            _ => {}
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
+                match event.logical_key.as_ref() {
+                    Key::Named(NamedKey::Space) => self.paused = !self.paused,
+                    Key::Named(NamedKey::Escape) => el.exit(),
+                    Key::Character("r") => {
+                        self.centre = [0.5, 0.5];
+                        self.half_height = 0.5;
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
         }
     }
 
@@ -247,7 +274,9 @@ impl ApplicationHandler for App {
 
 pub fn run(common: Common) {
     let event_loop = EventLoop::new().expect("event loop");
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(event_loop.owned_display_handle())));
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+        event_loop.owned_display_handle(),
+    )));
     let now = Instant::now();
     let mut app = App {
         common,

@@ -103,12 +103,13 @@ fn parse_view(s: &str) -> Result<[f32; 4], String> {
         "h" => px(1125.0, 750.0, 375.0, 375.0),
         "user" => px(330.0, 560.0, 900.0, 755.0),
         _ => {
-            let f: Vec<f32> = s.split(',').map(|x| x.parse::<f32>().map_err(|e| format!("{e}"))).collect::<Result<_, _>>()?;
+            let f: Vec<f32> =
+                s.split(',').map(|x| x.parse::<f32>().map_err(|e| format!("{e}"))).collect::<Result<_, _>>()?;
             if f.len() != 4 {
                 return Err("expected a view name or x0,y0,x1,y1".into());
             }
             [f[0], f[1], f[2], f[3]]
-        }
+        },
     })
 }
 
@@ -169,7 +170,13 @@ fn render(common: &Common, args: &RenderArgs) {
     for frame in 0..args.frames {
         let time = (args.time + frame as f32 / args.fps) * common.speed;
         let out_path = if args.frames > 1 { args.out.join(format!("{frame:04}.png")) } else { args.out.clone() };
-        let uniforms = Uniforms { resolution: [w as f32, h as f32], time, field_scale: ss as f32, view: v, params: common.param_array() };
+        let uniforms = Uniforms {
+            resolution: [w as f32, h as f32],
+            time,
+            field_scale: ss as f32,
+            view: v,
+            params: common.param_array(),
+        };
 
         let t0 = std::time::Instant::now();
         let mut enc = device.create_command_encoder(&Default::default());
@@ -193,7 +200,8 @@ fn render(common: &Common, args: &RenderArgs) {
 
         let image = {
             let data = slice.get_mapped_range().unwrap();
-            let tight: Vec<u8> = (0..h).flat_map(|y| data[(y * row) as usize..(y * row + w * 4) as usize].iter().copied()).collect();
+            let tight: Vec<u8> =
+                (0..h).flat_map(|y| data[(y * row) as usize..(y * row + w * 4) as usize].iter().copied()).collect();
             downsample(&tight, w, ss, ow, oh)
         };
         rbuf.unmap();
@@ -206,7 +214,9 @@ fn render(common: &Common, args: &RenderArgs) {
             let cs = cover.width() as f32;
             let (cx, cy) = ((v[0] * cs).max(0.0) as u32, (v[1] * cs).max(0.0) as u32);
             let (cw, ch) = (((v[2] - v[0]) * cs) as u32, ((v[3] - v[1]) * cs) as u32);
-            let crop = image::imageops::crop_imm(&cover, cx, cy, cw.min(cover.width() - cx), ch.min(cover.height() - cy)).to_image();
+            let crop =
+                image::imageops::crop_imm(&cover, cx, cy, cw.min(cover.width() - cx), ch.min(cover.height() - cy))
+                    .to_image();
             let crop = image::imageops::resize(&crop, ow, oh, image::imageops::FilterType::CatmullRom);
             let mut both = image::RgbImage::new(ow * 2 + 8, oh);
             image::imageops::replace(&mut both, &crop, 0, 0);
@@ -219,7 +229,14 @@ fn render(common: &Common, args: &RenderArgs) {
             let n = args.frames as f32;
             println!(
                 "{} {}x{} (ss {}) wall {:.0}ms | field {:.2}ms shade {:.2}ms (mean of {})",
-                out_path.display(), ow, oh, ss, gpu_ms, pass_sum[0] / n, pass_sum[1] / n, args.frames
+                out_path.display(),
+                ow,
+                oh,
+                ss,
+                gpu_ms,
+                pass_sum[0] / n,
+                pass_sum[1] / n,
+                args.frames
             );
         }
     }
