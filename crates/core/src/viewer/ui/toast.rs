@@ -31,6 +31,11 @@ impl Toasts {
         }
     }
 
+    /// Drops the toasts that are only hints, keeping warnings.
+    pub(crate) fn dismiss_hints(&mut self) {
+        self.live.retain(|t| t.warn);
+    }
+
     pub(crate) fn any(&mut self, now: Instant) -> bool {
         self.live.retain(|t| now - t.born < LIFE + FADE);
         !self.live.is_empty()

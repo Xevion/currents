@@ -407,7 +407,8 @@ impl App {
         let Some(g) = self.gfx.as_ref() else { return };
         let viewport = g.canvas.viewport();
         let slop = TOUCH_SLOP * g.window.scale_factor();
-        if consumed && touch.phase == TouchPhase::Started {
+        let on_menu = self.overlay.as_ref().is_some_and(|o| o.covers([touch.location.x, touch.location.y]));
+        if (consumed || on_menu) && touch.phase == TouchPhase::Started {
             return;
         }
         if touch.phase == TouchPhase::Started && !self.touch_hinted && self.settings.wallpaper.hint {

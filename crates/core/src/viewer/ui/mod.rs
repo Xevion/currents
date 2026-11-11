@@ -62,7 +62,11 @@ impl Overlay {
         self.menu.open
     }
 
-    pub(crate) const fn set_menu_open(&mut self, open: bool) {
+    /// Opening the menu clears hints about how to open it.
+    pub(crate) fn set_menu_open(&mut self, open: bool) {
+        if open {
+            self.toasts.dismiss_hints();
+        }
         self.menu.open = open;
     }
 
@@ -91,6 +95,14 @@ impl Overlay {
     /// Whether the pointer is over or held by an egui window.
     pub(crate) fn owns_pointer(&self) -> bool {
         self.menu.open && (self.ctx.egui_is_using_pointer() || self.ctx.is_pointer_over_egui())
+    }
+
+    /// Whether the open menu covers `at`, in window pixels. A touch has no hover before it
+    /// lands, so this asks where the menu is drawn rather than where the pointer last was.
+    pub(crate) fn covers(&self, at: [f64; 2]) -> bool {
+        let ppp = f64::from(self.ctx.pixels_per_point());
+        let pos = egui::pos2((at[0] / ppp) as f32, (at[1] / ppp) as f32);
+        self.menu.open && self.ctx.layer_id_at(pos).is_some_and(|layer| layer.order != Order::Background)
     }
 
     /// Runs one frame of the overlay, painted for a target the window's size.

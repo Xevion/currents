@@ -107,7 +107,7 @@ impl ParamGroup {
 
 /// A row of underlined tabs that never wraps, so the window grows to fit it instead.
 fn tabs<T: Copy + PartialEq + ToString>(ui: &mut Ui, current: &mut T, all: &[T]) {
-    ui.spacing_mut().item_spacing.x = METRICS.tab_gap;
+    ui.spacing_mut().item_spacing.x = if compact(ui.ctx()) { METRICS.tab_gap * 0.7 } else { METRICS.tab_gap };
     for &tab in all {
         let selected = *current == tab;
         let text = RichText::new(tab.to_string());
@@ -174,15 +174,164 @@ fn name(ui: &mut Ui, label: &str, help: &str) -> egui::Id {
     response.id
 }
 
-fn float(ui: &mut Ui, label: &str, value: &mut f32, range: RangeInclusive<f32>, help: &str) -> egui::Response {
+/// How a slider maps and shows its value.
+struct Spec<T> {
+    range: RangeInclusive<T>,
+    log: bool,
+    step: Option<f64>,
+    decimals: Option<usize>,
+    suffix: &'static str,
+}
+
+impl<T: egui::emath::Numeric> Spec<T> {
+    fn new(range: RangeInclusive<T>) -> Self {
+        Self { range, log: false, step: None, decimals: None, suffix: "" }
+    }
+
+    fn widget<'a>(&self, value: &'a mut T) -> egui::Slider<'a> {
+        let slider = egui::Slider::new(value, self.range.clone()).logarithmic(self.log).suffix(self.suffix);
+        let slider = match self.step {
+            Some(step) => slider.step_by(step),
+            None => slider,
+        };
+        match self.decimals {
+            Some(places) => slider.fixed_decimals(places),
+            None => slider,
+        }
+    }
+
+    fn text(&self, value: T) -> String {
+        let v = value.to_f64();
+        match self.decimals {
+            Some(places) => format!("{v:.places$}{}", self.suffix),
+            None if T::INTEGRAL => format!("{}{}", v.round(), self.suffix),
+            None => format!("{v:.2}{}", self.suffix),
+        }
+    }
+
+    /// Where `value` sits along the rail, from 0 to 1.
+    fn share(&self, value: T) -> f64 {
+        let (lo, hi, v) = (self.range.start().to_f64(), self.range.end().to_f64(), value.to_f64());
+        let t = if self.log && lo > 0.0 { (v / lo).ln() / (hi / lo).ln() } else { (v - lo) / (hi - lo) };
+        if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 }
+    }
+
+    /// The value at share `t` of the rail, on the step when there is one.
+    fn at(&self, t: f64) -> T {
+        let (lo, hi) = (self.range.start().to_f64(), self.range.end().to_f64());
+        let t = t.clamp(0.0, 1.0);
+        let mut v = if self.log && lo > 0.0 { lo * (hi / lo).powf(t) } else { (hi - lo).mul_add(t, lo) };
+        if let Some(step) = self.step {
+            v = (v / step).round() * step;
+        }
+        if T::INTEGRAL {
+            v = v.round();
+        }
+        T::from_f64(v.clamp(lo, hi))
+    }
+}
+
+/// Points a finger may wander up or down on a thumb before the drag counts as a swipe.
+const SWIPE_SLOP: f32 = 8.0;
+
+/// A slider for a finger. A tap on the rail jumps there and only a drag that starts on the
+/// thumb moves it, so a swipe up the list scrolls it instead of catching every rail it crosses.
+fn touch_slider<T: egui::emath::Numeric>(ui: &mut Ui, value: &mut T, spec: &Spec<T>) -> egui::Response {
+    let height = ui.spacing().interact_size.y;
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click());
+    let radius = 0.5 * ui.spacing().slider_rail_height;
+    let rail = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() - height, 2.0 * radius));
+    let x_of = |t: f64| egui::lerp(rail.x_range(), t as f32);
+    let t_of = |x: f32| f64::from(((x - rail.left()) / rail.width()).clamp(0.0, 1.0));
+    let thumb_at = egui::pos2(x_of(spec.share(*value)), rect.center().y);
+    let grip = ui.interact(
+        egui::Rect::from_center_size(thumb_at, egui::vec2(height * 1.4, height)),
+        response.id.with("thumb"),
+        egui::Sense::drag(),
+    );
+    // A drag moves the thumb by the finger's travel across from where it started, never to
+    // the finger, and once it has gone further up or down than across it hands the value back.
+    let held = grip.id.with("from");
+    if grip.drag_started() {
+        let from = (value.to_f64(), grip.interact_pointer_pos().unwrap_or(thumb_at));
+        ui.data_mut(|d| d.insert_temp(held, from));
+    }
+    let target = if grip.dragged() {
+        let from = ui.data(|d| d.get_temp::<(f64, egui::Pos2)>(held));
+        from.zip(grip.interact_pointer_pos()).map(|((original, start), pos)| {
+            let travel = pos - start;
+            let across = travel.y.abs() <= travel.x.abs().max(SWIPE_SLOP) && travel.x.abs() >= 1.0;
+            if across {
+                spec.at(spec.share(T::from_f64(original)) + f64::from(travel.x / rail.width()))
+            } else {
+                T::from_f64(original)
+            }
+        })
+    } else if response.clicked() {
+        response.interact_pointer_pos().map(|pos| spec.at(t_of(pos.x)))
+    } else {
+        None
+    };
+    if let Some(new) = target
+        && new.to_f64().total_cmp(&value.to_f64()).is_ne()
+    {
+        *value = new;
+        response.mark_changed();
+    }
+    let shown = spec.share(*value);
+    let enabled = ui.is_enabled();
+    let text = spec.text(*value);
+    response.widget_info(|| egui::WidgetInfo::slider(enabled, value.to_f64(), &text));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(rail, radius, PALETTE.track);
+        let filled = egui::Rect::from_min_max(rail.min, egui::pos2(x_of(shown), rail.max.y));
+        painter.rect_filled(filled, radius, PALETTE.accent);
+        let centre = egui::pos2(x_of(shown), rect.center().y);
+        let held = grip.dragged() || grip.hovered();
+        let edge = if held { PALETTE.accent } else { PALETTE.ink };
+        painter.circle(centre, 0.42 * height, PALETTE.track, Stroke::new(2.0, edge));
+    }
+    response | grip
+}
+
+/// A named slider: in the grid, the name then the slider and its value box; on a small screen,
+/// the name and value on one line over a rail the full width, with `extra` beside the value.
+fn slide<T: egui::emath::Numeric>(
+    ui: &mut Ui,
+    label: &str,
+    help: &str,
+    value: &mut T,
+    spec: &Spec<T>,
+    extra: impl FnOnce(&mut Ui, &mut T),
+) -> egui::Response {
+    if compact(ui.ctx()) {
+        let text = spec.text(*value);
+        let id = ui
+            .horizontal(|ui| {
+                let id = name(ui, label, help);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(text).color(PALETTE.muted));
+                    extra(ui, value);
+                });
+                id
+            })
+            .inner;
+        return touch_slider(ui, value, spec).labelled_by(id);
+    }
     let id = name(ui, label, help);
+    let response = ui.add(spec.widget(value)).labelled_by(id);
+    extra(ui, value);
+    response
+}
+
+fn float(ui: &mut Ui, label: &str, value: &mut f32, range: RangeInclusive<f32>, help: &str) -> egui::Response {
     let places = decimals(&range);
-    ui.add(egui::Slider::new(value, range).fixed_decimals(places)).labelled_by(id)
+    slide(ui, label, help, value, &Spec { decimals: Some(places), ..Spec::new(range) }, |_, _| {})
 }
 
 fn whole(ui: &mut Ui, label: &str, value: &mut u32, range: RangeInclusive<u32>, help: &str) {
-    let id = name(ui, label, help);
-    ui.add(egui::Slider::new(value, range)).labelled_by(id);
+    slide(ui, label, help, value, &Spec::new(range), |_, _| {});
     ui.end_row();
 }
 
@@ -208,15 +357,14 @@ fn limit<T: egui::emath::Numeric>(
     (label, help, value_label): (&str, &str, &str),
     value: &mut Option<T>,
     start: T,
-    slider: impl FnOnce(&mut T) -> egui::Slider<'_>,
+    spec: &Spec<T>,
 ) -> Option<egui::Response> {
     let mut on = value.is_some();
     if flag(ui, label, &mut on, help).changed() {
         *value = on.then_some(start);
     }
     let v = value.as_mut()?;
-    let id = name(ui, value_label, help);
-    let response = ui.add(slider(v)).labelled_by(id);
+    let response = slide(ui, value_label, help, v, spec, |_, _| {});
     ui.end_row();
     Some(response)
 }
@@ -228,7 +376,7 @@ fn frame_rate(ui: &mut Ui, fps: &mut Option<u32>) {
         ("Limit frame rate", "Hold to a frame rate below the display's, which saves power.", "Frame rate"),
         fps,
         DEFAULT_FPS,
-        |v| egui::Slider::new(v, limits::FPS_CAP).suffix(" fps"),
+        &Spec { suffix: " fps", ..Spec::new(limits::FPS_CAP) },
     );
 }
 
@@ -242,9 +390,6 @@ fn slider(ui: &mut Ui, label: &str, value: &mut f32, range: RangeInclusive<f32>,
 fn rows(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
     if compact(ui.ctx()) {
         ui.vertical(|ui| {
-            let room = ui.available_width();
-            let s = ui.spacing_mut();
-            s.slider_width = (room - s.interact_size.x - s.item_spacing.x).max(80.0);
             add(ui);
         });
         return;
@@ -254,36 +399,19 @@ fn rows(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
 
 fn param(ui: &mut Ui, spec: &ParamSpec, settings: &mut Settings) {
     let value = settings.params.get_mut(spec.slot);
+    let range = spec.min..=spec.max;
+    let places = decimals(&range);
     let reset = |ui: &mut Ui, value: &mut f32| {
         if *value != 0.0 && ui.small_button("reset").on_hover_text("Back to the designed value").clicked() {
             *value = 0.0;
         }
     };
-    if compact(ui.ctx()) {
-        let id = ui
-            .horizontal(|ui| {
-                let id = name(ui, spec.label, spec.help);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| reset(ui, value));
-                id
-            })
-            .inner;
-        let places = decimals(&(spec.min..=spec.max));
-        ui.add(egui::Slider::new(value, spec.min..=spec.max).fixed_decimals(places)).labelled_by(id);
-        return;
-    }
-    float(ui, spec.label, value, spec.min..=spec.max, spec.help);
-    reset(ui, value);
+    slide(ui, spec.label, spec.help, value, &Spec { decimals: Some(places), ..Spec::new(range) }, reset);
     ui.end_row();
 }
 
 fn params(ui: &mut Ui, group: &mut ParamGroup, settings: &mut Settings) {
-    if compact(ui.ctx()) {
-        egui::ScrollArea::horizontal().id_salt("groups").show(ui, |ui| {
-            ui.horizontal(|ui| tabs(ui, group, ParamGroup::VARIANTS));
-        });
-    } else {
-        ui.horizontal(|ui| tabs(ui, group, ParamGroup::VARIANTS));
-    }
+    ui.horizontal_wrapped(|ui| tabs(ui, group, ParamGroup::VARIANTS));
     ui.add_space(6.0);
     let shown = group.group();
     rows(ui, "params", |ui| {
@@ -307,7 +435,7 @@ fn render(ui: &mut Ui, settings: &mut Settings, info: &Info) {
             ("Cap shaded pixels", "Shade fewer pixels than the window has and scale the picture up.", "Max pixels"),
             &mut mp,
             DEFAULT_CAP_MP,
-            |v| egui::Slider::new(v, range).logarithmic(true).step_by(0.1).fixed_decimals(1).suffix(" MP"),
+            &Spec { log: true, step: Some(0.1), decimals: Some(1), suffix: " MP", ..Spec::new(range) },
         );
         if response.is_some_and(|r| r.changed()) || mp.is_some() != r.max_pixels.is_some() {
             // Whole tenths of a megapixel, which at the top would round past the cap's bound.
@@ -315,9 +443,8 @@ fn render(ui: &mut Ui, settings: &mut Settings, info: &Info) {
                 ((mp * 10.0).round() / 10.0 * MEGA).clamp(*limits::MAX_PIXELS.start(), *limits::MAX_PIXELS.end())
             });
         }
-        let id = name(ui, "Render scale", "Per-axis scale of the shaded picture.");
-        let scale = egui::Slider::new(&mut r.render_scale, limits::RENDER_SCALE).step_by(0.05).fixed_decimals(2);
-        ui.add(scale).labelled_by(id);
+        let scale = Spec { step: Some(0.05), decimals: Some(2), ..Spec::new(limits::RENDER_SCALE) };
+        slide(ui, "Render scale", "Per-axis scale of the shaded picture.", &mut r.render_scale, &scale, |_, _| {});
         ui.end_row();
         flag(ui, "Adapt to frame rate", &mut r.adaptive, "Shade fewer pixels while frames run long.");
     });
@@ -507,7 +634,7 @@ impl Menu {
     /// of settings with the footer at its end, scrolling as one.
     fn show_compact(&mut self, ctx: &egui::Context, settings: &mut Settings, info: &Info, commands: &mut Vec<Command>) {
         let screen = ctx.content_rect().shrink(COMPACT_MARGIN);
-        let frame = egui::Frame::window(&ctx.global_style());
+        let frame = egui::Frame::window(&ctx.global_style()).inner_margin(12);
         let inset = frame.total_margin().sum();
         egui::Window::new("Settings")
             .title_bar(false)
@@ -521,16 +648,13 @@ impl Menu {
                 let s = ui.spacing_mut();
                 s.interact_size.y = COMPACT_ROW;
                 s.button_padding.y = 9.0;
-                ui.horizontal(|ui| {
-                    let close = ui.spacing().interact_size.y;
-                    let room = ui.available_width() - close - ui.spacing().item_spacing.x;
-                    egui::ScrollArea::horizontal().id_salt("tabs").max_width(room).show(ui, |ui| {
-                        ui.horizontal(|ui| tabs(ui, &mut self.tab, Tab::VARIANTS));
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if close_button(ui) {
-                            commands.push(Command::Close);
-                        }
+                s.item_spacing.x = 8.0;
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if close_button(ui) {
+                        commands.push(Command::Close);
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Min).with_main_wrap(true), |ui| {
+                        tabs(ui, &mut self.tab, Tab::VARIANTS);
                     });
                 });
                 ui.separator();
@@ -686,6 +810,20 @@ mod tests {
             harness.run();
         }
         harness.event(press(from + by, false));
+        harness.run();
+    }
+
+    fn tap(harness: &mut Harness<'static, State>, at: egui::Pos2) {
+        use egui::{Event, Modifiers, PointerButton};
+        let press = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        harness.event(Event::PointerMoved(at));
+        harness.event(press(true));
+        harness.event(press(false));
         harness.run();
     }
 
@@ -872,5 +1010,45 @@ mod tests {
         harness.get_by_role_and_label(Role::CheckBox, "Pause when hidden").click();
         harness.run();
         check!(!harness.state().settings.wallpaper.pause_when_hidden);
+    }
+
+    #[test]
+    fn on_a_phone_a_swipe_up_the_menu_leaves_every_slider_alone() {
+        let mut harness = sized(Tab::Params, Settings::default(), [390.0, 844.0]);
+        harness.run();
+        let shown: Vec<_> = CATALOG.iter().filter(|s| s.group == Group::Obstacle).collect();
+        let top = harness.get_by_role_and_label(Role::Slider, shown[0].label).rect();
+        for spec in &shown {
+            let rail = harness.get_by_role_and_label(Role::Slider, spec.label).rect();
+            let share = (0.0 - spec.min) / (spec.max - spec.min);
+            let thumb =
+                egui::pos2(rail.left() + rail.height() / 2.0 + (rail.width() - rail.height()) * share, rail.center().y);
+            // From the thumb and from the bare rail, straight up past the first row.
+            for from in [thumb, egui::pos2(rail.left() + 12.0, rail.center().y)] {
+                drag(&mut harness, from, egui::vec2(1.5, top.top() - from.y - 40.0));
+                check!(
+                    harness.state().settings == Settings::default(),
+                    "a swipe from {from:?} on {} changed it",
+                    spec.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn on_a_phone_tapping_a_rail_sets_the_value_there_and_dragging_its_thumb_moves_it() {
+        let mut harness = sized(Tab::Params, Settings::default(), [390.0, 844.0]);
+        harness.run();
+        let spec = CATALOG.iter().find(|s| s.group == Group::Obstacle).expect("an obstacle parameter");
+        let value = |h: &Harness<'static, State>| h.state().settings.params.get(spec.slot);
+        let rail = harness.get_by_role_and_label(Role::Slider, spec.label).rect();
+        tap(&mut harness, egui::pos2(rail.left() + 0.05 * rail.width(), rail.center().y));
+        let tapped = value(&harness);
+        check!(tapped < 0.0, "a tap near the left end lowered the value: {tapped}");
+        let share = (tapped - spec.min) / (spec.max - spec.min);
+        let thumb_x = rail.left() + rail.height() / 2.0 + (rail.width() - rail.height()) * share;
+        drag(&mut harness, egui::pos2(thumb_x, rail.center().y), egui::vec2(rail.right() - thumb_x, 0.0));
+        check!(value(&harness) > 0.0, "dragging the thumb to the right end raised it: {}", value(&harness));
+        check!(harness.state().settings.clone().clamp().is_empty());
     }
 }

@@ -77,6 +77,8 @@ pub(crate) fn install(ctx: &egui::Context) {
     visuals.override_text_color = Some(swatch::INK);
     visuals.weak_text_color = Some(swatch::MUTED);
     widgets(&mut visuals);
+    // Ctrl and the plus or minus keys zoom the whole page in a browser; egui zooming the menu too would double it.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.set_theme(egui::Theme::Dark);
     ctx.set_visuals_of(egui::Theme::Dark, visuals);
     ctx.all_styles_mut(|style| {
