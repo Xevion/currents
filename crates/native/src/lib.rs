@@ -102,10 +102,33 @@ fn place(_: &std::sync::Arc<winit::window::Window>, _: &Placement) {}
 fn init_logging() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,currents=info,currents_core=info"));
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().compact().with_writer(std::io::stderr))
-        .with(filter)
-        .init();
+    let registry = tracing_subscriber::registry().with(filter);
+    match log_file() {
+        Some(file) => registry
+            .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_writer(std::sync::Mutex::new(file)))
+            .init(),
+        None => registry.with(tracing_subscriber::fmt::layer().compact().with_writer(std::io::stderr)).init(),
+    }
+}
+
+/// Where logs go when there is no console to write them to: a Windows release build started
+/// from anywhere but a terminal. Written afresh each run beside the settings file.
+#[cfg(all(windows, not(debug_assertions)))]
+fn log_file() -> Option<std::fs::File> {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+
+    // SAFETY: takes no pointers; it fails harmlessly when there is no parent console.
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0 {
+        return None;
+    }
+    let dir = dirs::config_dir()?.join("currents");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("currents.log")).ok()
+}
+
+#[cfg(not(all(windows, not(debug_assertions))))]
+const fn log_file() -> Option<std::fs::File> {
+    None
 }
 
 /// Parses the command line and runs the command it names.

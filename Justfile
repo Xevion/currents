@@ -10,6 +10,7 @@ lint:
     cargo clippy -q --workspace --all-targets -- -D warnings
     cargo clippy -q -p currents-web --target wasm32-unknown-unknown --no-default-features --features webgpu -- -D warnings
     cargo clippy -q -p currents-web --target wasm32-unknown-unknown --no-default-features --features webgl -- -D warnings
+    cargo clippy -q -p currents --target x86_64-pc-windows-gnu -- -D warnings
 
 test:
     cargo nextest run --workspace
@@ -17,6 +18,16 @@ test:
 # Run the viewer end to end in real windows on a virtual X display, never on the desktop.
 test-display:
     CURRENTS_TEST_DISPLAY=1 xvfb-run -a -s "-screen 0 1920x1080x24" cargo nextest run -p currents-core -p currents --run-ignored only -E 'test(/e2e::|x11::/)'
+
+# Cross-build the Windows exe with mingw-w64 (the x86_64-w64-mingw32 gcc and binutils).
+windows:
+    cargo build -q --release --target x86_64-pc-windows-gnu -p currents
+    @echo target/x86_64-pc-windows-gnu/release/currents.exe
+
+# Render a frame with the Windows exe under Proton on a virtual display and compare it with the
+# native one. `proton` is a Proton directory; the newest GE-Proton or Proton is found by default.
+windows-smoke proton="": windows
+    python3 -I scripts/windows_smoke.py {{proton}}
 
 fmt:
     cargo fmt --all

@@ -36,3 +36,6 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13.2"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }

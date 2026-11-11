@@ -740,6 +740,7 @@ dependencies = [
  "tracing-subscriber",
  "webpx",
  "wgpu",
+ "windows-sys 0.61.2",
  "winit",
  "x11rb",
 ]
