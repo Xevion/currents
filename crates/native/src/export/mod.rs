@@ -105,7 +105,7 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
     let shaded = size.scaled(ss);
 
     let sources = common.sources().context(ShadersSnafu)?;
-    let instance = wgpu::Instance::default();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
     let Gpu { device, queue, .. } = pollster::block_on(gpu::request(&instance, None)).context(GpuSnafu)?;
     let mut renderer = Renderer::new(&device, &queue, &sources);
     renderer.set_temporal(common.temporal());

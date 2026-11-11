@@ -263,7 +263,7 @@ fn print_row(label: &str, size: OutputSize, ss: u32, sample: Sample) {
 /// baseline shader directory, times that too and prints how much faster the passes are than it.
 pub(crate) fn run(common: &Common, args: &BenchArgs) -> Result<(), Error> {
     let sources = common.sources().context(ShadersSnafu)?;
-    let instance = wgpu::Instance::default();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
     let Gpu { adapter, device, queue } = pollster::block_on(gpu::request(&instance, None)).context(GpuSnafu)?;
     let info = adapter.get_info();
     let ss = common.supersampling();

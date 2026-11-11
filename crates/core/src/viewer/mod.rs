@@ -784,7 +784,8 @@ fn pick_monitor(el: &ActiveEventLoop, wanted: Option<&str>) -> Option<winit::mon
 
 fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<dyn Fn(LocalFuture)>) -> App {
     #[cfg(not(target_arch = "wasm32"))]
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+    // `WGPU_BACKEND` and the other wgpu variables pick a backend or relax checks, as under Wine.
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
         event_loop.owned_display_handle(),
     )));
     #[cfg(target_arch = "wasm32")]

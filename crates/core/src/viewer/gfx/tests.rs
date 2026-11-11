@@ -24,7 +24,7 @@ fn canvas_with(
     sources: &Sources,
     format: wgpu::TextureFormat,
 ) -> Canvas {
-    let instance = wgpu::Instance::default();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
     let Gpu { device, queue, .. } = pollster::block_on(gpu::request(&instance, None)).expect("a graphics adapter");
     pollster::block_on(Canvas::create(device, queue, format, physical, settings, sources))
 }
