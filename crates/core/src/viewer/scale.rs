@@ -6,6 +6,9 @@ const WINDOW_SECS: f32 = 0.5;
 const STALL_SECS: f32 = 0.25;
 /// Frame intervals beyond this mean frames are not keeping up.
 const SLOW_INTERVAL: f32 = 1.0 / 45.0;
+/// How far past the interval a frame rate limit asks for a frame may come and still keep up;
+/// the same margin `SLOW_INTERVAL` leaves a 60 Hz display.
+const LIMIT_SLACK: f32 = 60.0 / 45.0;
 /// GPU time per frame beyond this leaves too little of a 60 Hz frame for anything else.
 const SLOW_GPU: f32 = 1.0 / 70.0;
 /// Share of the slow mark under which a window counts as having headroom.
@@ -107,13 +110,16 @@ impl RenderScale {
     /// Counts a frame that came `dt` seconds after the last and spent `gpu` seconds in its
     /// passes, when the device times them; true when the scale or the field step changed.
     /// GPU time is the better measure, since the browser may space frames out on its own.
-    pub(crate) fn observe(&mut self, dt: f32, gpu: Option<f32>) -> bool {
+    /// Under a frame rate limit of `cap`, frames come that far apart on purpose, so only
+    /// frames later than the limit asks for count as slow.
+    pub(crate) fn observe(&mut self, dt: f32, gpu: Option<f32>, cap: Option<u32>) -> bool {
         if !self.budget.is_some_and(|b| b.adaptive) || dt > STALL_SECS {
             return false;
         }
         self.frames += 1;
         self.elapsed += dt;
-        self.pressure += gpu.filter(|&g| g > 0.0).map_or(dt / SLOW_INTERVAL, |g| g / SLOW_GPU);
+        let slow_interval = cap.map_or(SLOW_INTERVAL, |fps| (LIMIT_SLACK / fps as f32).max(SLOW_INTERVAL));
+        self.pressure += gpu.filter(|&g| g > 0.0).map_or(dt / slow_interval, |g| g / SLOW_GPU);
         if self.elapsed < WINDOW_SECS {
             return false;
         }
@@ -181,7 +187,7 @@ mod tests {
     fn timed(scale: &mut RenderScale, dt: f32, gpu: Option<f32>, secs: f32) -> bool {
         let mut changed = false;
         for _ in 0..(secs / dt) as u32 {
-            changed |= scale.observe(dt, gpu);
+            changed |= scale.observe(dt, gpu, None);
         }
         changed
     }
@@ -249,6 +255,23 @@ mod tests {
         let mut scale = RenderScale::new(Some(ADAPTIVE), 1);
         check!(!timed(&mut scale, 1.0 / 20.0, Some(0.004), 10.0));
         check!(timed(&mut scale, 1.0 / 60.0, Some(0.03), 1.2));
+    }
+
+    #[test]
+    fn frames_held_to_a_frame_rate_limit_are_not_read_as_slow() {
+        let mut scale = RenderScale::new(Some(ADAPTIVE), 1);
+        let mut changed = false;
+        for _ in 0..300 {
+            changed |= scale.observe(1.0 / 30.0, None, Some(30));
+        }
+        check!(!changed);
+        check!((scale.scale(), scale.field_step()) == (1.0, 1));
+        // Frames that cannot keep up even with the limit are still slow.
+        let mut changed = false;
+        for _ in 0..30 {
+            changed |= scale.observe(1.0 / 15.0, None, Some(30));
+        }
+        check!(changed);
     }
 
     #[test]

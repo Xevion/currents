@@ -506,12 +506,17 @@ impl App {
         if self.unsaved.is_some_and(|since| now - since >= SAVE_AFTER) {
             self.save();
         }
+        // The frame rate the frames are held to, battery limit included, spaces them on purpose.
+        let cap = match self.pacing() {
+            Pacing::Run(cap) => cap,
+            Pacing::Idle => None,
+        };
         let Some(g) = self.gfx.as_mut() else { return };
         if self.drawn_with != self.settings {
             g.canvas.apply(&self.drawn_with, &self.settings);
             self.drawn_with.clone_from(&self.settings);
         }
-        g.canvas.observe_frame(dt, self.passes, self.focused && !self.hidden);
+        g.canvas.observe_frame(dt, self.passes, self.focused && !self.hidden, cap);
         self.camera.advance(dt, g.canvas.viewport());
         let frame = g.acquire();
         let presented = frame.is_some();

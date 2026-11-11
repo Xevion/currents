@@ -186,13 +186,14 @@ impl Canvas {
 
     /// Feeds the last frame's interval and pass times to the render scale; `watched` is false
     /// while the page is hidden or unfocused, when the browser may slow frames on its own.
-    pub(crate) fn observe_frame(&mut self, dt: f32, passes: PassTimes, watched: bool) {
+    /// Counts a frame for the adaptive budget; `cap` is the frame rate the frames are held to.
+    pub(crate) fn observe_frame(&mut self, dt: f32, passes: PassTimes, watched: bool, cap: Option<u32>) {
         if !watched {
             self.scale.pause();
             return;
         }
         let gpu = passes.field + passes.shade;
-        if self.scale.observe(dt, (gpu > 0.0).then_some(gpu / 1000.0)) {
+        if self.scale.observe(dt, (gpu > 0.0).then_some(gpu / 1000.0), cap) {
             let size = self.size();
             info!(
                 scale = self.scale.scale(),
