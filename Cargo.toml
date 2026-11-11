@@ -78,7 +78,7 @@ debug = 1
 # The browser bundles: small over fast, since the shaders do the work.
 [profile.web]
 inherits = "release"
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
