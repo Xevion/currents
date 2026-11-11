@@ -6,6 +6,13 @@ use web_time::{Duration, Instant};
 use super::theme::{METRICS, PALETTE};
 
 const LIFE: Duration = Duration::from_millis(2500);
+/// The longest a toast stays before fading, however much it says.
+const LONGEST: Duration = Duration::from_secs(9);
+/// Reading time added per character beyond what fits in `LIFE`.
+const PER_CHAR: Duration = Duration::from_millis(55);
+const SHORT_CHARS: usize = 45;
+/// A gap between frames longer than this is a stall, which toasts do not age through.
+const STALL: Duration = Duration::from_millis(250);
 const FADE: Duration = Duration::from_millis(600);
 /// Toasts beyond this many push the oldest out.
 const MOST: usize = 4;
@@ -14,18 +21,27 @@ struct Toast {
     text: String,
     warn: bool,
     born: Instant,
+    life: Duration,
+}
+
+/// How long `text` stays before fading: long enough to read, within reason.
+fn life(text: &str) -> Duration {
+    let extra = text.chars().count().saturating_sub(SHORT_CHARS) as u32;
+    (LIFE + PER_CHAR * extra).min(LONGEST)
 }
 
 #[derive(Default)]
 pub(crate) struct Toasts {
     live: Vec<Toast>,
+    /// When the toasts were last checked, which is once a frame.
+    seen: Option<Instant>,
 }
 
 impl Toasts {
     /// Shows `text`; the same text already showing starts its life again instead of stacking.
     pub(crate) fn push(&mut self, text: String, warn: bool, now: Instant) {
         self.live.retain(|t| t.text != text);
-        self.live.push(Toast { text, warn, born: now });
+        self.live.push(Toast { life: life(&text), text, warn, born: now });
         if self.live.len() > MOST {
             self.live.remove(0);
         }
@@ -36,8 +52,17 @@ impl Toasts {
         self.live.retain(|t| t.warn);
     }
 
+    /// Whether any toast is still showing. Time with no frames, as during a slow first frame at
+    /// full size or while the page is hidden, does not count toward a toast's life.
     pub(crate) fn any(&mut self, now: Instant) -> bool {
-        self.live.retain(|t| now - t.born < LIFE + FADE);
+        let gap = self.seen.map_or(Duration::ZERO, |seen| now.saturating_duration_since(seen));
+        self.seen = Some(now);
+        if gap > STALL {
+            for toast in &mut self.live {
+                toast.born += gap;
+            }
+        }
+        self.live.retain(|t| now - t.born < t.life + FADE);
         !self.live.is_empty()
     }
 
@@ -53,7 +78,7 @@ impl Toasts {
             .show(ctx, |ui| {
                 for toast in &self.live {
                     let age = now - toast.born;
-                    let fade = age.saturating_sub(LIFE).as_secs_f32() / FADE.as_secs_f32();
+                    let fade = age.saturating_sub(toast.life).as_secs_f32() / FADE.as_secs_f32();
                     let alpha = (1.0 - fade).clamp(0.0, 1.0);
                     let ink = if toast.warn { PALETTE.warn } else { PALETTE.ink };
                     egui::Frame::popup(ui.style()).multiply_with_opacity(alpha).show(ui, |ui| {
@@ -62,5 +87,26 @@ impl Toasts {
                 }
             });
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+    use web_time::{Duration, Instant};
+
+    use super::Toasts;
+
+    #[test]
+    fn a_toast_outlasts_a_stall_in_the_frames() {
+        let start = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.push("Switched to WebGL2".to_owned(), true, start);
+        check!(toasts.any(start + Duration::from_millis(100)));
+        // No frame for five seconds, as when the first full-size frame is slow or the tab hides.
+        check!(toasts.any(start + Duration::from_secs(5)), "expired while nothing was drawn");
+        let frames = (0..250).map(|n| start + Duration::from_secs(5) + Duration::from_millis(16 * n));
+        let showing = frames.map(|at| toasts.any(at)).last();
+        check!(showing == Some(false), "never expired once frames resumed");
     }
 }
