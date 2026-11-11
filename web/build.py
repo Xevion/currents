@@ -17,6 +17,17 @@ BUNDLES = ROOT / "target" / "web"
 
 BACKENDS = ("webgpu", "webgl")
 
+# Link previews need absolute URLs, so the page names its own origin.
+SITE = "https://currents.xevion.dev"
+DESCRIPTION = (
+    "The Currents album cover by Tame Impala, recreated as a real-time fluid simulation"
+    " you can pan, zoom and play with in your browser."
+)
+IMAGE_ALT = (
+    "A recreation of the Tame Impala Currents album cover: purple and black stripes flowing"
+    " around a chrome sphere, with a red stream trailing behind it."
+)
+
 
 def emit(src: Path, name: str) -> str:
     """Copies `src` into assets/ under a content-hashed name and returns that name."""
@@ -56,6 +67,12 @@ def main() -> None:
             "CSS": css_name,
             "JS": js_name,
             "MANIFEST": json.dumps(manifest, separators=(",", ":")),
+            "SITE": SITE,
+            "DESCRIPTION": DESCRIPTION,
+            "IMAGE_ALT": IMAGE_ALT,
+            "OG": emit(WEB / "og.jpg", "og"),
+            "ICON32": emit(WEB / "icon-32.png", "icon-32"),
+            "ICON180": emit(WEB / "icon-180.png", "icon-180"),
         },
     )
     (DIST / "index.html").write_text(html)
