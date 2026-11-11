@@ -22,10 +22,10 @@ pub mod limits {
     pub const SPEED: RangeInclusive<f32> = 0.0..=4.0;
     pub const SUPERSAMPLING: RangeInclusive<u32> = 1..=4;
     pub const FIELD_STEP: RangeInclusive<u32> = 1..=4;
-    /// Frames per second; 0 follows the display.
-    pub const FPS_CAP: RangeInclusive<u32> = 0..=240;
-    /// Shaded pixels per frame; 0 shades every window pixel.
-    pub const MAX_PIXELS: RangeInclusive<f32> = 0.0..=33_177_600.0;
+    /// Frames per second a limited frame rate can be held to.
+    pub const FPS_CAP: RangeInclusive<u32> = 10..=240;
+    /// Shaded pixels per frame a cap can hold to, from a small preview up to 8K.
+    pub const MAX_PIXELS: RangeInclusive<f32> = 100_000.0..=33_177_600.0;
     pub const RENDER_SCALE: RangeInclusive<f32> = 0.3..=1.0;
     pub const EASE_SECS: RangeInclusive<f32> = 0.01..=1.0;
     pub const RETURN_SECS: RangeInclusive<f32> = 0.01..=2.0;
@@ -54,10 +54,13 @@ pub struct Render {
     pub supersampling: u32,
     /// Output pixels per flow field texel; an adaptive budget may coarsen it.
     pub field_step: u32,
-    /// Frames per second; 0 follows the display.
-    pub fps_cap: u32,
-    /// Shaded pixels per frame; 0 shades every window pixel.
-    pub max_pixels: f32,
+    /// Frames per second to hold to; without one, frames follow the display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps_cap: Option<u32>,
+    /// Pixels shaded per frame, the picture scaled up to fill the window; without a cap every
+    /// window pixel is shaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_pixels: Option<f32>,
     /// Per-axis scale the surface starts at.
     pub render_scale: f32,
     /// Lower the field resolution and the scale while frames run long, and recover with headroom.
@@ -70,8 +73,8 @@ impl Default for Render {
             temporal: true,
             supersampling: 1,
             field_step: 1,
-            fps_cap: 0,
-            max_pixels: 0.0,
+            fps_cap: None,
+            max_pixels: None,
             render_scale: 1.0,
             adaptive: false,
         }
@@ -81,12 +84,11 @@ impl Default for Render {
 impl Render {
     /// The pixel budget these fields describe; `None` renders every window pixel as it comes.
     pub fn budget(&self) -> Option<Budget> {
-        let unlimited = self.max_pixels <= 0.0;
-        if unlimited && !self.adaptive && self.render_scale >= 1.0 {
+        if self.max_pixels.is_none() && !self.adaptive && self.render_scale >= 1.0 {
             return None;
         }
         Some(Budget {
-            max_pixels: if unlimited { f64::INFINITY } else { f64::from(self.max_pixels) },
+            max_pixels: self.max_pixels.map_or(f64::INFINITY, f64::from),
             scale: f64::from(self.render_scale),
             adaptive: self.adaptive,
         })
@@ -213,14 +215,29 @@ fn clamp_into<T: PartialOrd + Copy + fmt::Display>(
 }
 
 impl Settings {
+    /// Settings with every optional value present, which shows the file every key it may hold.
+    pub(crate) fn schema() -> Self {
+        let mut s = Self::default();
+        s.render.fps_cap = Some(60);
+        s.render.max_pixels = Some(3_686_400.0);
+        s
+    }
+
     /// Pulls every value inside its bounds, reporting each one moved.
     pub fn clamp(&mut self) -> Vec<Issue> {
         let mut issues = Vec::new();
         let r = &mut self.render;
         clamp_into(&mut r.supersampling, &limits::SUPERSAMPLING, "render.supersampling", &mut issues);
         clamp_into(&mut r.field_step, &limits::FIELD_STEP, "render.field_step", &mut issues);
-        clamp_into(&mut r.fps_cap, &limits::FPS_CAP, "render.fps_cap", &mut issues);
-        clamp_into(&mut r.max_pixels, &limits::MAX_PIXELS, "render.max_pixels", &mut issues);
+        // Nothing or less per frame meant no limit, so it reads as none rather than as a tiny one.
+        r.fps_cap = r.fps_cap.filter(|&v| v > 0);
+        r.max_pixels = r.max_pixels.filter(|&v| v > 0.0);
+        if let Some(fps) = r.fps_cap.as_mut() {
+            clamp_into(fps, &limits::FPS_CAP, "render.fps_cap", &mut issues);
+        }
+        if let Some(pixels) = r.max_pixels.as_mut() {
+            clamp_into(pixels, &limits::MAX_PIXELS, "render.max_pixels", &mut issues);
+        }
         clamp_into(&mut r.render_scale, &limits::RENDER_SCALE, "render.render_scale", &mut issues);
         clamp_into(&mut self.motion.speed, &limits::SPEED, "motion.speed", &mut issues);
         let c = &mut self.camera;
@@ -239,6 +256,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use rstest::rstest;
 
     use super::*;
 
@@ -250,19 +268,48 @@ mod tests {
     #[test]
     fn values_past_their_bounds_are_held_at_the_edge_and_reported() {
         let mut settings = Settings::default();
-        settings.render.fps_cap = 1000;
+        settings.render.fps_cap = Some(1000);
         *settings.params.get_mut(27) = -50.0;
         let issues = settings.clamp();
-        check!(settings.render.fps_cap == *limits::FPS_CAP.end());
+        check!(settings.render.fps_cap == Some(*limits::FPS_CAP.end()));
         check!(settings.params.get(27).total_cmp(&CATALOG[26].min).is_eq());
         let paths: Vec<_> = issues.iter().map(|i| i.path.as_str()).collect();
         check!(paths == ["render.fps_cap", "params.ball_spin"]);
     }
 
+    #[rstest]
+    #[case::no_frames(Some(0), None)]
+    #[case::too_slow(Some(3), Some(*limits::FPS_CAP.start()))]
+    #[case::within(Some(60), Some(60))]
+    #[case::none(None, None)]
+    fn a_frame_rate_limit_of_nothing_means_no_limit(#[case] given: Option<u32>, #[case] held: Option<u32>) {
+        let mut settings = Settings::default();
+        settings.render.fps_cap = given;
+        settings.clamp();
+        check!(settings.render.fps_cap == held);
+    }
+
+    #[rstest]
+    #[case::nothing(Some(0.0), None)]
+    #[case::too_few(Some(10.0), Some(*limits::MAX_PIXELS.start()))]
+    #[case::within(Some(800_000.0), Some(800_000.0))]
+    #[case::too_many(Some(1e9), Some(*limits::MAX_PIXELS.end()))]
+    fn a_pixel_cap_is_held_within_what_the_menu_offers(#[case] given: Option<f32>, #[case] held: Option<f32>) {
+        let mut settings = Settings::default();
+        settings.render.max_pixels = given;
+        settings.clamp();
+        check!(settings.render.max_pixels == held);
+    }
+
+    #[test]
+    fn the_schema_sits_inside_its_bounds_too() {
+        check!(Settings::schema().clamp().is_empty());
+    }
+
     #[test]
     fn the_default_render_settings_keep_every_window_pixel() {
         check!(Render::default().budget().is_none());
-        let capped = Render { max_pixels: 1e6, ..Render::default() };
+        let capped = Render { max_pixels: Some(1e6), ..Render::default() };
         check!(capped.budget().map(|b| b.max_pixels) == Some(1e6));
     }
 }

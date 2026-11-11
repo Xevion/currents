@@ -31,7 +31,13 @@ pub enum Error {
 /// The viewer's starting point: the saved settings with this run's flags laid over them.
 fn launch(cli: &Cli, matches: &clap::ArgMatches) -> Result<Launch, Error> {
     let store::Loaded { mut settings, mut store, issues } = store::load();
-    cli.common.overlay(&mut settings, |id| matches.value_source(id) == Some(ValueSource::CommandLine));
+    let given = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+    let from_file = settings.clone();
+    cli.common.overlay(&mut settings, given);
+    let overridden = currents_core::settings::toml::changed(&from_file, &settings);
+    if !overridden.is_empty() {
+        tracing::info!(?overridden, "flags override the settings file for this run");
+    }
     store.assume(&settings);
     Ok(Launch {
         settings,
@@ -42,9 +48,11 @@ fn launch(cli: &Cli, matches: &clap::ArgMatches) -> Result<Launch, Error> {
     })
 }
 
-/// Logs to stderr at `warn` unless `RUST_LOG` says otherwise, and takes in the `log` records wgpu emits.
+/// Logs this program's own events at `info` and other crates' at `warn` to stderr, unless
+/// `RUST_LOG` says otherwise; takes in the `log` records wgpu emits.
 fn init_logging() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,currents=info,currents_core=info"));
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().compact().with_writer(std::io::stderr))
         .with(filter)

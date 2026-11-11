@@ -100,11 +100,12 @@ fn issue(path: &[String], message: impl Into<String>) -> Issue {
 /// unknown key is skipped; each is reported. Only text that is not TOML at all fails.
 pub fn load(text: &str) -> Result<(Settings, Vec<Issue>), Error> {
     let doc: DocumentMut = text.parse().context(ParseSnafu)?;
-    let defaults = tree(&Settings::default());
-    let mut merged = defaults.clone();
+    // The schema holds every key a file may set, optional ones included, each with its type.
+    let schema = tree(&Settings::schema());
+    let mut merged = tree(&Settings::default());
     let mut issues = Vec::new();
 
-    for (path, default) in leaves_of(&defaults) {
+    for (path, default) in leaves_of(&schema) {
         let Some(found) = lookup(doc.as_table(), &path) else { continue };
         let Some(found) = found.as_value().filter(|v| v.as_inline_table().is_none()) else {
             issues.push(issue(&path, format!("expected {}; using the default", describe(&default))));
@@ -119,7 +120,7 @@ pub fn load(text: &str) -> Result<(Settings, Vec<Issue>), Error> {
         }
     }
     for (path, _) in leaves_of(doc.as_table()) {
-        if lookup(&defaults, &path).is_none() {
+        if lookup(&schema, &path).is_none() {
             issues.push(issue(&path, "unknown setting; ignored"));
         }
     }
@@ -170,15 +171,47 @@ pub fn to_string(settings: &Settings) -> String {
 }
 
 fn write(doc: &mut DocumentMut, old: Option<&Table>, new: &Settings) -> bool {
+    let new = tree(new);
     let mut changed = false;
-    for (path, value) in leaves_of(&tree(new)) {
+    for (path, value) in leaves_of(&new) {
         let before = old.and_then(|t| lookup(t, &path)).and_then(Item::as_value).map(bare);
         if before.as_deref() != Some(bare(&value).as_str()) {
             set(doc.as_table_mut(), &path, value);
             changed = true;
         }
     }
+    // An optional setting switched off is written as the key's absence.
+    for (path, _) in old.map(|t| leaves_of(t)).unwrap_or_default() {
+        if lookup(&new, &path).is_none() {
+            changed |= remove(doc.as_table_mut(), &path);
+        }
+    }
     changed
+}
+
+/// The dotted paths of every setting that differs between `old` and `new`.
+pub fn changed(old: &Settings, new: &Settings) -> Vec<String> {
+    let (old, new) = (tree(old), tree(new));
+    let value_at = |t: &Table, path: &[String]| lookup(t, path).and_then(Item::as_value).map(bare);
+    let mut paths: Vec<String> = leaves_of(&new)
+        .into_iter()
+        .chain(leaves_of(&old))
+        .filter(|(path, _)| value_at(&old, path) != value_at(&new, path))
+        .map(|(path, _)| path.join("."))
+        .collect();
+    paths.dedup();
+    paths
+}
+
+/// Removes the value at `path`; true when there was one.
+fn remove(table: &mut dyn TableLike, path: &[String]) -> bool {
+    let Some((last, parents)) = path.split_last() else { return false };
+    let mut table = table;
+    for key in parents {
+        let Some(next) = table.get_mut(key).and_then(Item::as_table_like_mut) else { return false };
+        table = next;
+    }
+    table.remove(last).is_some()
 }
 
 #[cfg(test)]
@@ -205,7 +238,7 @@ mine = "kept"
     #[test]
     fn a_hand_edited_file_loads_what_it_says() {
         assert!(let Ok((settings, issues)) = load(HAND_EDITED));
-        check!(settings.render.fps_cap == 30);
+        check!(settings.render.fps_cap == Some(30));
         check!(settings.motion.speed.total_cmp(&0.25).is_eq());
         check!(settings.keys.toggle_menu.to_string() == "F1");
         check!(issues.iter().map(|i| i.path.as_str()).collect::<Vec<_>>() == ["extra.mine"]);
@@ -223,7 +256,7 @@ mine = "kept"
     fn writing_back_touches_only_the_changed_keys() {
         let (old, _) = load(HAND_EDITED).unwrap();
         let mut new = old.clone();
-        new.render.fps_cap = 60;
+        new.render.fps_cap = Some(60);
         new.motion.speed = 0.4;
         new.wallpaper.hint = false;
         let mut doc: DocumentMut = HAND_EDITED.parse().unwrap();
@@ -241,12 +274,50 @@ mine = "kept"
         let text =
             "[render]\nfps_cap = \"lots\"\nsupersampling = 2\n[keys]\npause = \"Ctrl+Banana\"\n[motion]\nspeed = 1\n";
         assert!(let Ok((settings, issues)) = load(text));
-        check!(settings.render.fps_cap == 0);
+        check!(settings.render.fps_cap.is_none());
         check!(settings.render.supersampling == 2);
         check!(settings.keys.pause == Settings::default().keys.pause);
         check!(settings.motion.speed.total_cmp(&1.0).is_eq());
         let paths: Vec<_> = issues.iter().map(|i| i.path.as_str()).collect();
         check!(paths == ["render.fps_cap", "keys.pause"]);
+    }
+
+    #[test]
+    fn switching_a_limit_off_removes_its_key_and_on_brings_it_back() {
+        let (old, _) = load(HAND_EDITED).unwrap();
+        let mut off = old.clone();
+        off.render.fps_cap = None;
+        let mut doc: DocumentMut = HAND_EDITED.parse().unwrap();
+        check!(write_back(&mut doc, &old, &off));
+        check!(!doc.to_string().contains("fps_cap"));
+        check!(doc.to_string().contains("# temporal stays on"));
+        check!(load(&doc.to_string()).unwrap().0 == off);
+
+        let mut on = off.clone();
+        on.render.max_pixels = Some(800_000.0);
+        check!(write_back(&mut doc, &off, &on));
+        check!(doc.to_string().contains("max_pixels = 800000.0"));
+        check!(load(&doc.to_string()).unwrap().0 == on);
+    }
+
+    #[test]
+    fn the_defaults_write_no_optional_keys() {
+        let text = to_string(&Settings::default());
+        check!(!text.contains("fps_cap") && !text.contains("max_pixels"));
+        check!(load(&text).unwrap().0 == Settings::default());
+    }
+
+    /// A file the menu wrote before the limits became optional, which froze the viewer at
+    /// launch; it has to load as it reads, with nothing to report.
+    const WRITTEN_WITH_ZERO_FOR_NONE: &str = "[params]\nobstacle_scale = 0.21\nglare_gain = 0.3\n\n[render]\nsupersampling = 1\nadaptive = false\nmax_pixels = 800000.0\nfield_step = 1\nfps_cap = 0\n";
+
+    #[test]
+    fn a_file_with_zero_for_no_frame_rate_limit_loads_as_written() {
+        assert!(let Ok((settings, issues)) = load(WRITTEN_WITH_ZERO_FOR_NONE));
+        check!(issues.is_empty(), "{issues:?}");
+        check!(settings.render.fps_cap.is_none());
+        check!(settings.render.max_pixels == Some(800_000.0));
+        check!(settings.params.get(1).total_cmp(&0.21).is_eq());
     }
 
     #[test]

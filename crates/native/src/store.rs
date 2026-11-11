@@ -51,7 +51,10 @@ fn load_from(path: Option<PathBuf>) -> Loaded {
     };
     let text = match fs::read_to_string(&file) {
         Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            tracing::info!(file = %file.display(), "no settings file yet; starting from the defaults");
+            String::new()
+        },
         Err(e) => return disabled(path, format!("{} could not be read: {e}", file.display())),
     };
     let (settings, issues) = match settings::toml::load(&text) {
@@ -65,6 +68,9 @@ fn load_from(path: Option<PathBuf>) -> Loaded {
     let issues: Vec<String> = issues.iter().map(ToString::to_string).collect();
     for issue in &issues {
         tracing::warn!(%issue, file = %file.display(), "settings file");
+    }
+    if !text.is_empty() {
+        tracing::info!(file = %file.display(), problems = issues.len(), "settings loaded");
     }
     let store = FileStore { path, doc, saved: settings.clone(), problem: None };
     Loaded { settings, store, issues }
@@ -90,9 +96,10 @@ impl FileStore {
 impl Store for FileStore {
     fn save(&mut self, settings: &Settings) -> Result<(), String> {
         let (None, Some(path)) = (&self.problem, &self.path) else { return Ok(()) };
+        let changed = settings::toml::changed(&self.saved, settings);
         if settings::toml::write_back(&mut self.doc, &self.saved, settings) {
             Self::write(path, &self.doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))?;
-            tracing::debug!(file = %path.display(), "settings saved");
+            tracing::info!(file = %path.display(), ?changed, "settings saved");
         }
         self.saved = settings.clone();
         Ok(())
@@ -135,7 +142,7 @@ mod tests {
         run.motion.speed = 2.0;
         loaded.store.assume(&run);
         let mut edited = run.clone();
-        edited.render.fps_cap = 30;
+        edited.render.fps_cap = Some(30);
         check!(loaded.store.save(&edited).is_ok());
         let text = fs::read_to_string(&path).unwrap();
         check!(text.contains("fps_cap = 30"));
@@ -149,7 +156,7 @@ mod tests {
         let mut loaded = load_from(Some(path.clone()));
         check!(loaded.store.problem().is_some());
         let mut edited = loaded.settings.clone();
-        edited.render.fps_cap = 30;
+        edited.render.fps_cap = Some(30);
         check!(loaded.store.save(&edited).is_ok());
         check!(fs::read_to_string(&path).unwrap() == "[render\n");
     }

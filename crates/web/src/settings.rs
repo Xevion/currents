@@ -26,7 +26,7 @@ pub(crate) fn from_url() -> Launch {
     let scale = number("scale").filter(|&s| s > 0.0);
     let mut settings = Settings::default();
     let r = &mut settings.render;
-    r.max_pixels = number("pixels").filter(|&v| v >= 1.0).unwrap_or(MAX_PIXELS);
+    r.max_pixels = Some(number("pixels").filter(|&v| v >= 1.0).unwrap_or(MAX_PIXELS));
     r.render_scale = scale.unwrap_or(1.0);
     r.adaptive = scale.is_none();
     if let Some(ss) = number("ss") {

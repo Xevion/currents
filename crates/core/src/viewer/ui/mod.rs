@@ -15,6 +15,8 @@ use winit::window::Window;
 
 use self::panels::Menu;
 pub(crate) use self::panels::{Command, Info};
+#[cfg(test)]
+pub(crate) use self::theme::install as install_theme;
 use self::theme::{METRICS, PALETTE};
 use self::toast::Toasts;
 use crate::settings::Settings;
@@ -23,7 +25,7 @@ use crate::settings::Settings;
 pub(crate) struct Painted {
     pub(crate) primitives: Vec<ClippedPrimitive>,
     pub(crate) textures: TexturesDelta,
-    /// Surface pixels per point, which differs from the window's when the surface is scaled down.
+    /// Target pixels per point.
     pub(crate) pixels_per_point: f32,
 }
 
@@ -91,14 +93,13 @@ impl Overlay {
         self.menu.open && (self.ctx.egui_is_using_pointer() || self.ctx.is_pointer_over_egui())
     }
 
-    /// Runs one frame of the overlay; `surface_ratio` is surface pixels per window pixel.
+    /// Runs one frame of the overlay, painted for a target the window's size.
     pub(crate) fn frame(
         &mut self,
         window: &Window,
         settings: &mut Settings,
         info: &Info,
         ring: Option<Ring>,
-        surface_ratio: f32,
     ) -> (Painted, Vec<Command>) {
         let now = Instant::now();
         let raw = self.state.take_egui_input(window);
@@ -112,7 +113,7 @@ impl Overlay {
             }
         });
         self.state.handle_platform_output(window, output.platform_output);
-        let pixels_per_point = output.pixels_per_point * surface_ratio;
+        let pixels_per_point = output.pixels_per_point;
         let primitives = self.ctx.tessellate(output.shapes, pixels_per_point);
         (Painted { primitives, textures: output.textures_delta, pixels_per_point }, commands)
     }

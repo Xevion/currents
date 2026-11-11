@@ -1,7 +1,11 @@
 mod blit;
+#[cfg(all(test, target_os = "linux"))]
+mod e2e;
 mod gfx;
 mod opener;
 mod scale;
+#[cfg(test)]
+mod testing;
 mod title;
 mod touch;
 mod ui;
@@ -29,7 +33,7 @@ use winit::window::{Window, WindowId};
 use crate::camera::{Camera, PIXELS_PER_LINE};
 use crate::gpu;
 use crate::renderer::{FieldView, PassTimes, Uniforms};
-use crate::settings::{Action, Chord, Settings};
+use crate::settings::{self, Action, Chord, Settings};
 use crate::shaders::Sources;
 
 const TITLE: &str = "currents";
@@ -48,8 +52,6 @@ pub enum Error {
     Gpu { source: gpu::Error },
     #[snafu(display("the graphics adapter does not support the window's surface"))]
     NoSurfaceConfig,
-    #[snafu(display("the shaders did not compile on this device: {message}"))]
-    Pipelines { message: String },
 }
 
 /// Where the viewer keeps settings between runs. The viewer calls `save` a moment after the
@@ -89,6 +91,8 @@ pub type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
 /// Carries the finished graphics setup from the startup future back to the event loop.
 struct Started(Result<Box<Gfx>, Error>);
 
+/// Seconds to wait before asking again for a frame the surface did not give.
+const RETRY_SECS: f64 = 0.05;
 /// Seconds after the last change before settings are saved.
 const SAVE_AFTER: Duration = Duration::from_secs(1);
 /// Weight of the newest frame in the frame rate the menu shows.
@@ -131,6 +135,12 @@ struct App {
     capturing: Option<Action>,
     touches: Touches,
     title: FrameCounter,
+    /// When the viewer was set up.
+    started_at: Instant,
+    /// Frames presented so far.
+    presented: u64,
+    /// The device fault last shown to the person, so each one is announced once.
+    announced_fault: Option<String>,
     failure: Option<Error>,
 }
 
@@ -176,6 +186,7 @@ impl App {
         if new == self.settings {
             return;
         }
+        tracing::debug!(changed = ?settings::toml::changed(&self.settings, &new), "settings changed");
         self.camera.tuning = new.camera;
         self.settings = new;
         if self.store.is_some() {
@@ -185,10 +196,11 @@ impl App {
 
     fn save(&mut self) {
         let (Some(store), Some(_)) = (self.store.as_mut(), self.unsaved.take()) else { return };
-        if let Err(reason) = store.save(&self.settings)
-            && let Some(overlay) = self.overlay.as_mut()
-        {
-            overlay.toast(format!("Settings were not saved: {reason}"), true);
+        if let Err(reason) = store.save(&self.settings) {
+            tracing::error!(%reason, "settings were not saved");
+            if let Some(overlay) = self.overlay.as_mut() {
+                overlay.toast(format!("Settings were not saved: {reason}"), true);
+            }
         }
     }
 
@@ -219,7 +231,7 @@ impl App {
         let info = self.info();
         let mut settings = self.settings.clone();
         let overlay = self.overlay.as_mut()?;
-        let (painted, commands) = overlay.frame(&g.window, &mut settings, &info, ring, g.canvas.surface_ratio());
+        let (painted, commands) = overlay.frame(&g.window, &mut settings, &info, ring);
         self.change(settings);
         for command in commands {
             self.command(command);
@@ -250,7 +262,10 @@ impl App {
     }
 
     fn set_menu(&mut self, open: bool) {
-        if let Some(overlay) = self.overlay.as_mut() {
+        if let Some(overlay) = self.overlay.as_mut()
+            && overlay.menu_open() != open
+        {
+            tracing::debug!(open, "menu");
             overlay.set_menu_open(open);
         }
         if !open {
@@ -303,24 +318,42 @@ impl App {
             return;
         }
         let mut new = self.settings.clone();
-        *new.keys.get_mut(action) = Chord::new(code, self.modifiers);
+        let chord = Chord::new(code, self.modifiers);
+        tracing::info!(action = %action, chord = %chord, "key bound");
+        *new.keys.get_mut(action) = chord;
         self.change(new);
     }
 
-    /// Schedules the next frame: at once under vsync, or when a capped frame rate allows.
-    fn schedule(&self, el: &ActiveEventLoop, started: Instant) {
+    /// Schedules the next frame: at once under vsync, when a frame rate limit allows, or after
+    /// a short wait when the surface gave no frame, so a surface that keeps refusing never
+    /// spins the loop.
+    fn schedule(&self, el: &ActiveEventLoop, started: Instant, presented: bool) {
         let Some(g) = self.gfx.as_ref() else { return };
         if self.hidden && self.settings.wallpaper.pause_when_hidden {
             el.set_control_flow(ControlFlow::Wait);
             return;
         }
-        match self.settings.render.fps_cap {
-            0 => {
+        let wait =
+            if presented { self.settings.render.fps_cap.map(|cap| 1.0 / f64::from(cap)) } else { Some(RETRY_SECS) };
+        match wait {
+            None => {
                 el.set_control_flow(ControlFlow::Wait);
                 g.window.request_redraw();
             },
-            cap => el.set_control_flow(ControlFlow::WaitUntil(started + Duration::from_secs_f64(1.0 / f64::from(cap)))),
+            Some(secs) => el.set_control_flow(ControlFlow::WaitUntil(started + Duration::from_secs_f64(secs))),
         }
+    }
+
+    /// Tells the person once about a fault that stopped the shading.
+    fn announce_fault(&mut self) {
+        let fault = self.gfx.as_ref().and_then(|g| g.canvas.fault());
+        if fault == self.announced_fault {
+            return;
+        }
+        if let (Some(fault), Some(overlay)) = (&fault, self.overlay.as_mut()) {
+            overlay.toast(format!("Drawing stopped: {fault}. Change a setting to try again."), true);
+        }
+        self.announced_fault = fault;
     }
 
     fn redraw(&mut self, el: &ActiveEventLoop) {
@@ -339,17 +372,24 @@ impl App {
         }
         g.canvas.observe_frame(dt);
         self.camera.advance(dt, g.canvas.viewport());
-        if let Some(frame) = g.acquire() {
+        let frame = g.acquire();
+        let presented = frame.is_some();
+        if let Some(frame) = frame {
+            self.announce_fault();
             let painted = self.overlay_frame(now);
             let Some(g) = self.gfx.as_mut() else { return };
             let uniforms = frame_uniforms(&self.settings, &self.camera, self.time, g);
             self.passes = g.draw(frame, &uniforms, self.view, painted);
+            self.presented += 1;
+            if self.presented == 1 {
+                tracing::info!(elapsed_ms = self.started_at.elapsed().as_millis(), "first frame presented");
+            }
             self.update_title(now, self.passes);
             if let Some(on_ready) = self.hooks.on_ready.take() {
                 on_ready();
             }
         }
-        self.schedule(el, now);
+        self.schedule(el, now, presented);
     }
 
     fn touch(&mut self, touch: Touch) {
@@ -471,7 +511,10 @@ impl ApplicationHandler<Started> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+        if let WindowEvent::KeyboardInput { event: key, is_synthetic, .. } = &event {
+            tracing::debug!(key = ?key.physical_key, state = ?key.state, repeat = key.repeat, synthetic = is_synthetic, "key");
+        }
+        if let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = &event
             && key.state == ElementState::Pressed
             && let (Some(action), PhysicalKey::Code(code)) = (self.capturing, key.physical_key)
         {
@@ -496,7 +539,9 @@ impl ApplicationHandler<Started> for App {
             },
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::RedrawRequested => self.redraw(el),
-            WindowEvent::KeyboardInput { event, .. }
+            // A synthetic press is a key already held as the window gained focus, not a new one;
+            // acting on it would run a toggle twice when focus and the press arrive together.
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
                 if event.state == ElementState::Pressed && !event.repeat && !consumed =>
             {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -549,6 +594,9 @@ fn app(event_loop: &EventLoop<Started>, launch: Launch, hooks: Hooks, spawn: Box
         capturing: None,
         touches: Touches::default(),
         title: FrameCounter::new(now),
+        presented: 0,
+        announced_fault: None,
+        started_at: now,
         failure: None,
     }
 }

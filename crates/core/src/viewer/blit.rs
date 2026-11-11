@@ -1,7 +1,7 @@
 use crate::gpu::linear_sampler;
 use crate::renderer::draw_fullscreen;
 
-/// Scales the renderer's colour texture onto the window's surface.
+/// Scales the renderer's colour texture over the whole of a target of any size.
 pub(crate) struct Blit {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
@@ -9,14 +9,13 @@ pub(crate) struct Blit {
 }
 
 impl Blit {
-    /// `supersampling` is the colour texture's size in texels per surface pixel along each axis.
-    pub(crate) fn new(device: &wgpu::Device, target: wgpu::TextureFormat, supersampling: u32) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, target: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit"),
             source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
         });
         let options = wgpu::PipelineCompilationOptions {
-            constants: &[("scale", f64::from(supersampling)), ("to_linear", f64::from(target.is_srgb()))],
+            constants: &[("to_linear", f64::from(target.is_srgb()))],
             ..Default::default()
         };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -68,6 +67,6 @@ mod tests {
     #[test]
     fn blit_shader_validates_and_translates_for_webgl() {
         validate("blit", include_str!("blit.wgsl"));
-        to_webgl("blit", include_str!("blit.wgsl"), &[("scale", 1.0), ("to_linear", 0.0)]);
+        to_webgl("blit", include_str!("blit.wgsl"), &[("to_linear", 0.0)]);
     }
 }

@@ -14,6 +14,10 @@ lint:
 test:
     cargo nextest run --workspace
 
+# Run the viewer end to end in real windows on a virtual X display, never on the desktop.
+test-display:
+    CURRENTS_TEST_DISPLAY=1 xvfb-run -a -s "-screen 0 1920x1080x24" cargo nextest run -p currents-core --run-ignored only -E 'test(/e2e::/)'
+
 fmt:
     cargo fmt --all
 
