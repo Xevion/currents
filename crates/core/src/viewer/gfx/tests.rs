@@ -86,7 +86,7 @@ fn frame(canvas: &mut Canvas, settings: &mut Settings, time: f32, view: Option<F
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let uniforms = canvas.uniforms(time, [0.0, 0.0, 1.0, 1.0], settings.params.0);
+    let uniforms = canvas.uniforms(f64::from(time), [0.0, 0.0, 1.0, 1.0], settings.params.0);
     let painted = overlay.then(|| menu(canvas.physical, settings));
     canvas.draw(&target, &uniforms, view, painted);
     device.poll(wgpu::PollType::wait_indefinitely()).expect("the frame finishes");

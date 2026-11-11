@@ -125,7 +125,7 @@ pub(crate) fn run(common: &Common, args: &RenderArgs) -> Result<(), Error> {
             [size.width, size.height],
             ss,
             common.field_step,
-            (args.time + frame as f32 / args.fps) * common.speed,
+            (args.time + f64::from(frame) / f64::from(args.fps)) * f64::from(common.speed),
             std::array::from_fn(|edge| from[edge] + (to[edge] - from[edge]) * along),
             common.param_array(),
         );

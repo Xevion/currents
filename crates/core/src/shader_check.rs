@@ -15,6 +15,18 @@ pub(crate) fn validate(name: &str, source: &str) {
     parse(name, source);
 }
 
+/// The value of the constant `name` as the embedded shaders declare it, if one does.
+pub(crate) fn declared(name: &str) -> Option<f64> {
+    let sources = crate::shaders::Sources::embedded();
+    let prefix = format!("const {name} = ");
+    [&sources.common, &sources.field, &sources.shade]
+        .into_iter()
+        .flat_map(|text| text.lines())
+        .find_map(|line| line.strip_prefix(&prefix))
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|number| number.trim().parse().ok())
+}
+
 /// Translates every entry point of `source` to GLSL ES 3.00 the way the WebGL2 backend does,
 /// with `constants` filling its overrides; panics if any stage fails.
 pub(crate) fn to_webgl(name: &str, source: &str, constants: &[(&str, f64)]) {

@@ -9,7 +9,14 @@ const EDDY_FADE_END = 26.0;
 // Only liquid all but stopped behind the ball needs them all.
 const MAX_TRACE_DT = 0.25;
 const MAX_TRACE_STEPS = 192;
-const FLOW_SPEED = 4.0;   // periods per second
+
+// Eddy noise lengths (periods), how fast each noise changes as it is carried along (noise cells
+// per second), and the sinuous swing's wavelength (periods).
+const EDDY_LEN_X = 9.0;
+const EDDY_LEN_SMALL = 5.5;
+const LARGE_EDDY_CHURN = 0.04;
+const SMALL_EDDY_CHURN = 0.05;
+const SINUOUS_LEN = 26.0;
 
 // smoothstep and its slope
 fn smoothstep_with_slope(a: f32, b: f32, x: f32) -> vec2f {
@@ -86,22 +93,23 @@ fn flow_velocity(y: vec2f, t: f32, scn: Scene) -> vec2f {
     v += wake_velocity(y, scn);
 
     let xi = y - vec2f(FLOW_SPEED * t, 0.0);
-    let lx = 9.0 + P(P_EDDY_LEN_X);
+    let lx = EDDY_LEN_X + P(P_EDDY_LEN_X);
     let ly = 12.0 + P(P_EDDY_LEN_Y);
-    let l2 = 5.5 + P(P_EDDY_LEN_SMALL);
+    let l2 = EDDY_LEN_SMALL + P(P_EDDY_LEN_SMALL);
     let a1 = 1.4 + P(P_EDDY_AMP_LARGE);
     let a2 = 0.4 + P(P_EDDY_AMP_SMALL);
-    let n1 = gradient_noise_smooth(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));
-    let n2 = gradient_noise_smooth(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));
+    let n1 = gradient_noise_smooth(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, LARGE_EDDY_CHURN * t) + u.eddy_drift.xy);
+    let n2 = gradient_noise_smooth(xi / l2 + vec2f(-8.1, 5.9) + vec2f(SMALL_EDDY_CHURN * t + u.eddy_drift.z, 0.0));
     let nv = a1 * lx * n1.x + a2 * l2 * n2.x;
     let ng = vec2f(a1 * n1.y + a2 * n2.y, a1 * lx / ly * n1.z + a2 * n2.z);
 
-    let km = 6.2831853 / 26.0;
+    let km = 6.2831853 / SINUOUS_LEN;
     let hm = 9.0;
     let am = 0.5 + P(P_SINUOUS_AMP);
     let gy = exp(-(y.y * y.y) / (hm * hm));
-    let sv = am / km * sin(km * xi.x) * gy;
-    let sg = vec2f(am * cos(km * xi.x) * gy, sv * (-2.0 * y.y / (hm * hm)));
+    let phase = km * (xi.x - u.eddy_drift.w);
+    let sv = am / km * sin(phase) * gy;
+    let sg = vec2f(am * cos(phase) * gy, sv * (-2.0 * y.y / (hm * hm)));
 
     let en = eddy_envelope(y, scn);
     let grad = en.amp.x * ng + nv * en.grad_noise + en.amp.y * sg + sv * en.grad_sinuous;
@@ -220,12 +228,13 @@ fn key_liquid(y: vec2f, scn: Scene, exact: bool) -> vec2f {
     let g = (cover - u.key_view.xy) / (u.key_view.zw - u.key_view.xy) * u.key_size - 0.5;
     let cell = floor(g);
     if (any(cell < vec2f(1.0)) || any(cell > u.key_size - 3.0)) { return traced(y, u.key_time, scn); }
+    let shift = vec2f(0.0, u.key_shift);
     if (!exact) {
         let f = g - cell;
         let at = vec2i(cell);
         let top = mix(textureLoad(key, at, 0).xy, textureLoad(key, at + vec2i(1, 0), 0).xy, f.x);
         let bottom = mix(textureLoad(key, at + vec2i(0, 1), 0).xy, textureLoad(key, at + vec2i(1, 1), 0).xy, f.x);
-        return mix(top, bottom, f.y);
+        return mix(top, bottom, f.y) + shift;
     }
     let wx = catmull_rom(g.x - cell.x);
     let wy = catmull_rom(g.y - cell.y);
@@ -237,7 +246,7 @@ fn key_liquid(y: vec2f, scn: Scene, exact: bool) -> vec2f {
         }
         acc += wy[j] * row;
     }
-    return acc;
+    return acc + shift;
 }
 
 // The liquid at p now, by way of the key.

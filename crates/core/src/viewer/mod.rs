@@ -123,7 +123,7 @@ struct App {
     view: Option<FieldView>,
     paused: bool,
     hidden: bool,
-    time: f32,
+    time: f64,
     last: Instant,
     fps: f32,
     passes: PassTimes,
@@ -144,7 +144,7 @@ struct App {
     failure: Option<Error>,
 }
 
-fn frame_uniforms(settings: &Settings, camera: &Camera, time: f32, gfx: &Gfx) -> Uniforms {
+fn frame_uniforms(settings: &Settings, camera: &Camera, time: f64, gfx: &Gfx) -> Uniforms {
     gfx.canvas.uniforms(time, camera.view(gfx.canvas.viewport()).to_array(), settings.params.0)
 }
 
@@ -161,7 +161,7 @@ impl App {
     fn advance_clock(&mut self, now: Instant) -> f32 {
         let dt = (now - self.last).as_secs_f32();
         if !self.paused {
-            self.time += dt * self.settings.motion.speed;
+            self.time += f64::from(dt) * f64::from(self.settings.motion.speed);
         }
         self.last = now;
         if dt > 0.0 {

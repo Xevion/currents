@@ -41,6 +41,8 @@ const LIGHT = vec2f(-0.8716, -0.4903);   // toward the light, on screen
 // toward the key light in camera space, as placed by the ball's main highlight
 const LIGHT3 = vec3f(-0.734, -0.513, -0.445);
 const GRAIN_PERIOD = 0.4;                      // grain refresh period for the moving liquid
+const BALL_SPIN = 0.08;                        // radians per second the ball turns
+const GLARE_RATE = 0.9;                        // noise cells per second the glare's flicker runs through
 
 // Grain of a fixed physical size (cell in ref px), about unit spread, two octaves. Zooming
 // magnifies it; fpx (ref px per shaded px) fades out each octave before it nears two
@@ -69,8 +71,10 @@ fn flow_grain(gp: vec2f, v: vec2f, cell: f32, fpx: f32, seed: f32) -> vec3f {
     let ph = u.time / GRAIN_PERIOD;
     let f1 = fract(ph);
     let f2 = fract(ph + 0.5);
-    let n1 = grain_slope(gp - v * (f1 * GRAIN_PERIOD) + hash22(vec2f(floor(ph), seed)) * 211.0, cell, fpx);
-    let n2 = grain_slope(gp - v * (f2 * GRAIN_PERIOD) + hash22(vec2f(floor(ph + 0.5), seed + 3.0)) * 211.0, cell, fpx);
+    // the clock restarts as a copy does, so the copies number their restarts from it
+    let cycles = EPOCH / GRAIN_PERIOD;
+    let n1 = grain_slope(gp - v * (f1 * GRAIN_PERIOD) + hash22(vec2f(floor(ph) % cycles, seed)) * 211.0, cell, fpx);
+    let n2 = grain_slope(gp - v * (f2 * GRAIN_PERIOD) + hash22(vec2f(floor(ph + 0.5) % cycles, seed + 3.0)) * 211.0, cell, fpx);
     let w = 1.0 - abs(2.0 * f1 - 1.0);
     return (w * n1 + (1.0 - w) * n2) * inverseSqrt(w * w + (1.0 - w) * (1.0 - w));
 }
@@ -132,7 +136,7 @@ fn band_at(c: f32, glen: f32, gh: vec2f, m: f32, edge: f32, rough: f32) -> Band 
     var o: Band;
     let k = floor(c);
     let f = c - k;
-    let duty = DUTY + (0.05 + P(P_BAND_WIDTH_JITTER)) * (value_noise(vec2f(m * 0.35, k * 3.7)) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
+    let duty = DUTY + (0.05 + P(P_BAND_WIDTH_JITTER)) * (value_noise(vec2f(m * 0.35, k * 3.7), 0.35 * FLOW_SPEED * EPOCH) - 0.5) + 0.03 * (hash12(vec2f(k, 7.0)) - 0.5);
     let lo = 1.0 - duty;
     let w = duty / glen;
     // distances (ref px) to the band's low and high edges; negative outside the band
@@ -407,7 +411,7 @@ fn ball_surface(pix: Pixel, scn: Scene, ball: Ball) -> BallSurface {
     // fixed to the surface and travels with it
     let s0 = vec3f(d2, -bz);
     let ax = scn.cam.ev;
-    let th = (0.08 + P(P_BALL_SPIN)) * u.time;
+    let th = (BALL_SPIN + P(P_BALL_SPIN)) * u.time + u.spin;
     let sr = s0 * cos(th) + cross(ax, s0) * sin(th) + ax * dot(ax, s0) * (1.0 - cos(th));
     let sw = sr * sr * sr * sr;
     let swn = sw / (sw.x + sw.y + sw.z);
@@ -646,7 +650,7 @@ fn paint_ball(col_in: vec3f, pix: Pixel, scn: Scene, ball: Ball) -> vec4f {
 
 // Glare round the two highlights, breathing a little as if light came through moving water.
 fn glare(col_in: vec3f, cover: vec2f) -> vec3f {
-    let fl1 = 1.0 + 0.1 * gradient_noise(vec2f(u.time * 0.9, 1.7)).x * 2.0;
+    let fl1 = 1.0 + 0.1 * gradient_noise(vec2f(u.time * GLARE_RATE + u.glare_drift, 1.7)).x * 2.0;
     let h1 = length(cover - (BALL_C + BALL_R * vec2f(-0.43, -0.45))) / BALL_R;
     let h2 = length(cover - (BALL_C + BALL_R * vec2f(0.045, -0.57))) / BALL_R;
     let glow = (0.3 * exp(-pow(h1 / 0.42, 2.0)) + 0.07 * exp(-h1 / 0.45)

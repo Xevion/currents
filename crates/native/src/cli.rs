@@ -132,7 +132,7 @@ pub(crate) struct BenchArgs {
     pub(crate) sizes: Vec<OutputSize>,
     /// Time of the first frame in seconds (before the speed multiplier)
     #[arg(long, default_value_t = 10.0)]
-    pub(crate) time: f32,
+    pub(crate) time: f64,
     /// Frames timed per measurement
     #[arg(long, default_value_t = 30)]
     pub(crate) frames: u32,
@@ -158,7 +158,7 @@ pub(crate) struct RenderArgs {
     pub(crate) size: Option<OutputSize>,
     /// Start time in seconds (before the speed multiplier)
     #[arg(long, default_value_t = 0.0)]
-    pub(crate) time: f32,
+    pub(crate) time: f64,
     /// Output file, or a directory of numbered files for several frames (a .webp file takes
     /// them as one animation); defaults to out/frame.<format>, or out/frames for several
     #[arg(long)]

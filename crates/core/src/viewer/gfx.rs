@@ -229,7 +229,7 @@ impl Canvas {
     }
 
     /// The uniforms for a frame of the current size.
-    pub(crate) fn uniforms(&self, time: f32, view: [f32; 4], params: ParamBlock) -> Uniforms {
+    pub(crate) fn uniforms(&self, time: f64, view: [f32; 4], params: ParamBlock) -> Uniforms {
         let size = self.size();
         Uniforms::new([size.width, size.height], self.supersampling(), self.field_step(), time, view, params)
     }

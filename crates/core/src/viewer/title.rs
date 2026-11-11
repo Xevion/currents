@@ -21,7 +21,7 @@ impl FrameCounter {
         &mut self,
         now: Instant,
         passes: PassTimes,
-        time: f32,
+        time: f64,
         paused: bool,
         view: Option<FieldView>,
     ) -> Option<String> {

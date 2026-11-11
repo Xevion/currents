@@ -1,3 +1,4 @@
+mod clock;
 mod debug;
 mod key;
 mod noise;
@@ -5,6 +6,7 @@ mod pass;
 mod resolve;
 mod timing;
 
+use clock::Clock;
 pub use debug::FieldView;
 use key::{Key, Keys};
 pub(crate) use pass::draw_fullscreen;
@@ -23,6 +25,7 @@ use crate::shaders::Sources;
 pub struct Uniforms {
     /// Shade pixels along each axis.
     resolution: [f32; 2],
+    /// Seconds of flow since the shaders' clock restarted; see `clock`.
     time: f32,
     /// Shade pixels per field texel along each axis.
     field_scale: f32,
@@ -41,6 +44,15 @@ pub struct Uniforms {
     jitter: [f32; 2],
     elapsed: f32,
     history: f32,
+    /// Where what drifts with time stood when the clock restarted.
+    eddy_drift: [f32; 4],
+    spin: f32,
+    glare_drift: f32,
+    /// Added to the flow labels read from the key, whose clock restarted earlier; filled in
+    /// with the key.
+    key_shift: f32,
+    /// Restarts of the clock so far.
+    epoch: f32,
     params: ParamBlock,
 }
 
@@ -55,14 +67,14 @@ impl Uniforms {
         output: [u32; 2],
         supersampling: u32,
         field_step: u32,
-        time: f32,
+        time: f64,
         view: [f32; 4],
         params: ParamBlock,
     ) -> Self {
         let supersampling = supersampling.max(1);
         Self {
             resolution: output.map(|v| (v * supersampling) as f32),
-            time,
+            time: 0.0,
             field_scale: (supersampling * field_step.max(1)) as f32,
             view,
             supersampling: supersampling as f32,
@@ -73,25 +85,44 @@ impl Uniforms {
             jitter: [0.0; 2],
             elapsed: 0.0,
             history: 0.0,
+            eddy_drift: [0.0; 4],
+            spin: 0.0,
+            glare_drift: 0.0,
+            key_shift: 0.0,
+            epoch: 0.0,
             params,
         }
+        .at(time)
+    }
+
+    /// These uniforms at `time`.
+    fn at(self, time: f64) -> Self {
+        let Clock { epoch, time, eddy_drift, spin, glare_drift } = Clock::at(time, &self.params);
+        Self { time, eddy_drift, spin, glare_drift, epoch, ..self }
+    }
+
+    /// Seconds of flow since time zero.
+    fn clock(&self) -> f64 {
+        f64::from(self.epoch).mul_add(clock::EPOCH, f64::from(self.time))
     }
 
     /// Whether `before` is a frame this one can be blended with: the same picture size and
     /// tuning, a little earlier. The view may have moved.
     fn follows(&self, before: &Self) -> bool {
-        let shape = |u: &Self| Self { time: 0.0, view: [0.0; 4], ..*u };
-        shape(self) == shape(before) && (0.0..MAX_BLEND_GAP).contains(&(self.time - before.time))
+        let shape = |u: &Self| Self { view: [0.0; 4], ..u.at(0.0) };
+        shape(self) == shape(before) && (0.0..MAX_BLEND_GAP).contains(&(self.clock() - before.clock()))
     }
 
     /// Whether this frame shows the flow `before` showed, no earlier in time. The view and the
     /// picture's size may have changed: keys span the cover, not the screen.
     fn continues(&self, before: &Self) -> bool {
-        self.params == before.params && self.time >= before.time
+        self.params == before.params && self.clock() >= before.clock()
     }
 
     fn with_key(mut self, key: &Key) -> Self {
-        self.key_time = key.time;
+        let restarts = f64::from(self.epoch) - clock::epoch(key.time);
+        self.key_time = (key.time - f64::from(self.epoch) * clock::EPOCH) as f32;
+        self.key_shift = (restarts * clock::LABEL_STEP) as f32;
         self.key_size = key.size.map(|v| v as f32);
         self.key_view = key.view;
         self
@@ -102,7 +133,6 @@ impl Uniforms {
     fn for_key(&self, key: &Key, from: Option<&Key>) -> Self {
         let own = Self {
             resolution: key.size.map(|v| v as f32),
-            time: key.time,
             field_scale: 1.0,
             view: key.view,
             supersampling: 1.0,
@@ -113,7 +143,8 @@ impl Uniforms {
             jitter: [0.0; 2],
             elapsed: 0.0,
             history: 0.0,
-            params: self.params,
+            key_shift: 0.0,
+            ..self.at(key.time)
         };
         from.map_or(own, |from| own.with_key(from))
     }
@@ -127,7 +158,7 @@ const HOP_CONSTANTS: [(&str, f64); 1] = [("hop_step", HOP_STEP as f64)];
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Longest stretch of flow between two frames that are still blended; past it the liquid has
 /// moved too far for the earlier frame to say anything about this one.
-const MAX_BLEND_GAP: f32 = 0.25;
+const MAX_BLEND_GAP: f64 = 0.25;
 /// Past this many frames a blend has settled, and the count stops mattering.
 const MAX_BLENDED: u32 = 64;
 
@@ -357,13 +388,13 @@ impl Renderer {
             self.keys.clear();
             return None;
         };
-        let dt = uniforms.time - before.time;
+        let dt = (uniforms.clock() - before.clock()) as f32;
         let drift = std::array::from_fn(|i| uniforms.view[i] - before.view[i]);
-        let slice = self.keys.advance(uniforms.time, dt, uniforms.view, drift, field_texels)?;
+        let slice = self.keys.advance(uniforms.clock(), dt, uniforms.view, drift, field_texels)?;
         if slice.is_heavy() {
             // a large share of a key in one frame is a visible hitch
             tracing::debug!(
-                time = uniforms.time,
+                time = uniforms.clock(),
                 dt,
                 key_time = slice.key.time,
                 span = slice.key.span,
@@ -494,7 +525,7 @@ impl Renderer {
         let built_on = before.filter(|before| blend && self.blended > 0 && uniforms.follows(before));
         if let Some(before) = built_on {
             frame.prev_view = before.view;
-            frame.elapsed = uniforms.time - before.time;
+            frame.elapsed = (uniforms.clock() - before.clock()) as f32;
             frame.history = self.blended.min(MAX_BLENDED) as f32;
             frame.jitter = resolve::jitter(self.frame);
             self.frame = self.frame.wrapping_add(1);

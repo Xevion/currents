@@ -1,6 +1,13 @@
+// The clock restarts from zero every EPOCH seconds of flow, which keeps it precise however
+// long the picture runs. Everything that drifts with time is given where it had drifted to at
+// the restart. A restart moves every flow label by FLOW_SPEED * EPOCH = 6400, and every
+// pattern drawn from the labels repeats over that, so it does not show.
+const EPOCH = 1600.0;
+const FLOW_SPEED = 4.0;   // periods per second
+
 struct Uniforms {
     resolution: vec2f,      // shade pixels
-    time: f32,
+    time: f32,              // seconds since the clock restarted
     field_scale: f32,       // shade pixels per field texel
     view: vec4f,
     supersampling: f32,     // shade pixels per output pixel
@@ -11,6 +18,11 @@ struct Uniforms {
     jitter: vec2f,          // shift of this frame's shading points, in shade pixels
     elapsed: f32,           // time since the frame before
     history: f32,           // frames blended so far that this one builds on
+    eddy_drift: vec4f,      // the eddy noise (xyz) and sinuous swing (w) at the restart
+    spin: f32,              // the ball's turn at the restart
+    glare_drift: f32,       // the glare's flicker at the restart
+    key_shift: f32,         // added to labels read from the key, whose clock restarted earlier
+    epoch: f32,             // restarts so far; for the renderer, not read here
     params: array<vec4f, 8>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -166,12 +178,15 @@ fn gradient_noise_spaced(p: vec2f, stride: f32) -> vec3f {
     return textureSampleLevel(noise_tile, noise_smp, p / NOISE_PERIOD, log2(max(stride * texels, 1.0))).xyz;
 }
 
-fn value_noise(p: vec2f) -> f32 {
+// Value noise repeating every `period` cells along x, centred on zero.
+fn value_noise(p: vec2f, period: f32) -> f32 {
     let i = floor(p);
-    let f = fract(p);
+    let f = p - i;
     let w = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash12(i), hash12(i + vec2f(1.0, 0.0)), w.x),
-               mix(hash12(i + vec2f(0.0, 1.0)), hash12(i + vec2f(1.0, 1.0)), w.x), w.y);
+    let x = vec2f(i.x, i.x + 1.0);
+    let c = x - period * floor(x / period + 0.5);
+    return mix(mix(hash12(vec2f(c.x, i.y)), hash12(vec2f(c.y, i.y)), w.x),
+               mix(hash12(vec2f(c.x, i.y + 1.0)), hash12(vec2f(c.y, i.y + 1.0)), w.x), w.y);
 }
 
 struct Scene {

@@ -45,11 +45,11 @@ const STAGES: &[Stage] = &[
         name: "eddy noise",
         edits: &[
             (
-                "let n1 = gradient_noise_smooth(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, 0.04 * t));",
+                "let n1 = gradient_noise_smooth(vec2f(xi.x / lx, xi.y / ly) + vec2f(3.7, 1.3) + vec2f(0.0, LARGE_EDDY_CHURN * t) + u.eddy_drift.xy);",
                 "let n1 = vec3f(0.0 * t);",
             ),
             (
-                "let n2 = gradient_noise_smooth(xi / l2 + vec2f(-8.1, 5.9) + vec2f(0.05 * t, 0.0));",
+                "let n2 = gradient_noise_smooth(xi / l2 + vec2f(-8.1, 5.9) + vec2f(SMALL_EDDY_CHURN * t + u.eddy_drift.z, 0.0));",
                 "let n2 = vec3f(0.0 * t);",
             ),
         ],
@@ -176,7 +176,7 @@ impl Bench<'_> {
                 [size.width, size.height],
                 self.common.supersampling(),
                 self.common.field_step,
-                (self.args.time + frame as f32 / 30.0) * self.common.speed,
+                (self.args.time + f64::from(frame) / 30.0) * f64::from(self.common.speed),
                 view.view.to_array(),
                 self.common.param_array(),
             );

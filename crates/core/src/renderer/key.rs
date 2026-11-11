@@ -162,7 +162,7 @@ fn ahead(view: [f32; 4], drift: [f32; 4], frames: f32) -> [f32; 4] {
 /// When a key is taken, what it spans and how long it serves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Key {
-    pub(super) time: f32,
+    pub(super) time: f64,
     /// Seconds after `time` the key serves.
     pub(super) span: f32,
     /// Part of the cover it spans: the view, a margin, and where the view was heading.
@@ -179,12 +179,12 @@ impl Key {
     /// where one would not pay.
     ///
     /// Key times sit on a grid of the span, so a frame's key depends only on the frame.
-    pub(super) fn plan(time: f32, view: [f32; 4], field: [u32; 2]) -> Option<Self> {
+    pub(super) fn plan(time: f64, view: [f32; 4], field: [u32; 2]) -> Option<Self> {
         Self::around(time, view, view, field)
     }
 
     /// As `plan`, for a view on its way to `heading`: the key spans both.
-    fn around(time: f32, view: [f32; 4], heading: [f32; 4], field: [u32; 2]) -> Option<Self> {
+    fn around(time: f64, view: [f32; 4], heading: [f32; 4], field: [u32; 2]) -> Option<Self> {
         let (span, margin) = terms(view, field)?;
         let size = extent(view);
         let by = [margin[0] * size[0], margin[1] * size[1]];
@@ -193,7 +193,7 @@ impl Key {
         let bounds = both.unwrap_or_else(|| grown(view, by));
         let across = extent(bounds);
         Some(Self {
-            time: (time / span).floor() * span,
+            time: (time / f64::from(span)).floor() * f64::from(span),
             span,
             view: bounds,
             size: std::array::from_fn(|axis| (field[axis] as f32 * across[axis] / size[axis]).ceil() as u32),
@@ -210,13 +210,13 @@ impl Key {
 
     /// Whether a frame at `time` falls in the stretch this key serves.
     #[cfg(test)]
-    fn serves(&self, time: f32) -> bool {
-        time >= self.time && time < self.time + self.span
+    fn serves(&self, time: f64) -> bool {
+        time >= self.time && time < self.time + f64::from(self.span)
     }
 
     /// Whether a frame at `time` can still read this key, at the cost of a longer step back.
-    fn reaches(&self, time: f32) -> bool {
-        time >= self.time && time < 2.0f32.mul_add(self.span, self.time)
+    fn reaches(&self, time: f64) -> bool {
+        time >= self.time && time < 2.0f64.mul_add(f64::from(self.span), self.time)
     }
 
     /// Whether `bounds` lies within the key, give or take a texel.
@@ -294,7 +294,7 @@ impl Keys {
     /// can be read, otherwise the next few stripes of the one coming.
     pub(super) fn advance(
         &mut self,
-        time: f32,
+        time: f64,
         dt: f32,
         view: [f32; 4],
         drift: [f32; 4],
@@ -344,7 +344,7 @@ impl Keys {
             } else if soft && still {
                 Some(Coming { key: wanted, done: 0, carried: false, frames: RETRACE_FRAMES })
             } else {
-                Key::around(1.5f32.mul_add(held.span, held.time), view, heading, field)
+                Key::around(1.5f64.mul_add(f64::from(held.span), held.time), view, heading, field)
                     .filter(|key| key.time > held.time)
                     .map(|key| Coming {
                         key: Key { detail: key.detail.min(held.detail), ..key },
@@ -376,7 +376,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::shaders::Sources;
+    use crate::shader_check::declared;
 
     const FULL: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
     const STILL: [f32; 4] = [0.0; 4];
@@ -390,14 +390,7 @@ mod tests {
     #[case("FOCAL", FOCAL)]
     #[case("FLOW_SPEED", FLOW_SPEED)]
     fn constants_match_the_embedded_shaders(#[case] name: &str, #[case] value: f32) {
-        let sources = Sources::embedded();
-        let text = format!("{}\n{}", sources.common, sources.field);
-        let declared = text
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("const {name} = ")))
-            .and_then(|rest| rest.split(';').next())
-            .and_then(|number| number.trim().parse::<f32>().ok());
-        check!(declared == Some(value));
+        check!(declared(name).map(|v| v as f32) == Some(value));
     }
 
     #[rstest]
@@ -415,7 +408,7 @@ mod tests {
     fn the_whole_cover_gets_a_full_span_and_a_modest_margin() {
         assert!(let Some(key) = Key::plan(7.3, FULL, [1920, 1920]));
         check!(key.span >= SPAN);
-        check!(key.serves(7.3) && !key.serves(key.time + key.span));
+        check!(key.serves(7.3) && !key.serves(key.time + f64::from(key.span)));
         check!(key.view[0] < 0.0 && key.view[0] > -MAX_MARGIN - 0.01);
         check!(key.size[0] > 1920 && key.size[0] < 2420);
     }
@@ -449,7 +442,7 @@ mod tests {
         let mut done = 0;
         let mut frame = 1;
         while keys.held().is_some_and(|(_, key)| key == held) {
-            let slice = keys.advance(dt.mul_add(frame as f32, 7.0), dt, FULL, STILL, FIELD);
+            let slice = keys.advance(f64::from(dt).mul_add(f64::from(frame), 7.0), dt, FULL, STILL, FIELD);
             if let Some(slice) = slice.filter(|_| keys.held().is_some_and(|(_, key)| key == held)) {
                 check!(slice.slot != slot && slice.stripes.start == done && !slice.is_heavy());
                 check!(slice.from == Some(held));
@@ -479,7 +472,7 @@ mod tests {
             .filter_map(|frame| {
                 let moved = if frame == 0 { STILL } else { drift };
                 at = std::array::from_fn(|i| at[i] + moved[i]);
-                keys.advance(dt.mul_add(frame as f32, 7.0), dt, at, moved, FIELD)
+                keys.advance(f64::from(dt).mul_add(f64::from(frame), 7.0), dt, at, moved, FIELD)
             })
             .collect();
         (slices, at)
