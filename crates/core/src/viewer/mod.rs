@@ -76,6 +76,26 @@ pub struct Launch {
     pub store: Option<Box<dyn Store>>,
     /// Problems the settings were read with, shown once at startup and kept in the menu.
     pub issues: Vec<String>,
+    pub placement: Placement,
+    /// Runs once the window is up and drawing, with the handle that changes the viewer, so the
+    /// host can do what the window toolkit cannot, like X11 hints or watching for fullscreen apps.
+    pub on_window: Option<OnWindow>,
+}
+
+/// What a host runs once the viewer's window is up.
+pub type OnWindow = Box<dyn FnOnce(Arc<Window>, Remote)>;
+
+/// Where the viewer's window goes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// An ordinary window.
+    #[default]
+    Window,
+    /// Behind every other window on one monitor, as X11 desktops place a wallpaper; the monitor
+    /// by name or index, the primary one without either.
+    Desktop { monitor: Option<String> },
+    /// Inside another program's X11 window, as xwinwrap gives one.
+    Embed(u32),
 }
 
 /// Page callbacks: `on_ready` after the first frame, `on_error` with the reason the viewer stopped.
@@ -138,6 +158,9 @@ struct App {
     sources: Sources,
     store: Option<Box<dyn Store>>,
     issues: Vec<String>,
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "a page places its own canvas"))]
+    placement: Placement,
+    on_window: Option<OnWindow>,
     /// When settings last changed without being saved since.
     unsaved: Option<Instant>,
     instance: wgpu::Instance,
@@ -554,7 +577,7 @@ impl ApplicationHandler<Event> for App {
         self.starting = true;
         let attrs = Window::default_attributes().with_title(TITLE);
         #[cfg(not(target_arch = "wasm32"))]
-        let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(900, 900));
+        let attrs = placed(attrs.with_inner_size(winit::dpi::LogicalSize::new(900, 900)), &self.placement, el);
         #[cfg(target_arch = "wasm32")]
         let attrs = {
             use winit::platform::web::WindowAttributesExtWebSys;
@@ -593,6 +616,9 @@ impl ApplicationHandler<Event> for App {
                 }
                 self.overlay = Some(overlay);
                 self.last = Instant::now();
+                if let Some(on_window) = self.on_window.take() {
+                    on_window(Arc::clone(&gfx.window), Remote(self.proxy.clone()));
+                }
                 self.gfx = Some(*gfx);
             },
             Event::Started(Err(error)) => self.fail(el, error),
@@ -655,6 +681,61 @@ impl ApplicationHandler<Event> for App {
     }
 }
 
+/// `attrs` for a window at `placement`.
+#[cfg(not(target_arch = "wasm32"))]
+fn placed(
+    attrs: winit::window::WindowAttributes,
+    placement: &Placement,
+    el: &ActiveEventLoop,
+) -> winit::window::WindowAttributes {
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::{WindowAttributesExtX11, WindowType};
+        match placement {
+            Placement::Window => attrs,
+            Placement::Desktop { monitor } => {
+                let attrs = attrs
+                    .with_decorations(false)
+                    .with_window_level(winit::window::WindowLevel::AlwaysOnBottom)
+                    .with_x11_window_type(vec![WindowType::Desktop]);
+                match pick_monitor(el, monitor.as_deref()) {
+                    Some(m) => {
+                        tracing::info!(monitor = ?m.name(), size = ?m.size(), position = ?m.position(), "desktop placement");
+                        attrs.with_position(m.position()).with_inner_size(m.size())
+                    },
+                    None => attrs,
+                }
+            },
+            Placement::Embed(parent) => {
+                tracing::info!(parent = format_args!("{parent:#x}"), "embedded placement");
+                attrs.with_embed_parent_window(*parent)
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = el;
+        if *placement != Placement::Window {
+            tracing::warn!(?placement, "only X11 places the viewer on the desktop; opening a window");
+        }
+        attrs
+    }
+}
+
+/// The monitor named `wanted`, or at index `wanted`, else the primary one.
+#[cfg(target_os = "linux")]
+fn pick_monitor(el: &ActiveEventLoop, wanted: Option<&str>) -> Option<winit::monitor::MonitorHandle> {
+    let all: Vec<_> = el.available_monitors().collect();
+    let names: Vec<_> = all.iter().map(winit::monitor::MonitorHandle::name).collect();
+    let found = wanted.and_then(|w| {
+        all.iter().find(|m| m.name().as_deref() == Some(w)).or_else(|| w.parse::<usize>().ok().and_then(|i| all.get(i)))
+    });
+    if let (Some(w), None) = (wanted, found) {
+        tracing::warn!(wanted = w, available = ?names, "no such monitor; using the primary one");
+    }
+    found.cloned().or_else(|| el.primary_monitor()).or_else(|| all.first().cloned())
+}
+
 fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<dyn Fn(LocalFuture)>) -> App {
     #[cfg(not(target_arch = "wasm32"))]
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
@@ -663,7 +744,7 @@ fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<d
     #[cfg(target_arch = "wasm32")]
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let now = Instant::now();
-    let Launch { settings, sources, debug, store, issues } = launch;
+    let Launch { settings, sources, debug, store, issues, placement, on_window } = launch;
     App {
         camera: Camera::new(settings.camera),
         view: debug,
@@ -672,6 +753,8 @@ fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<d
         sources,
         store,
         issues,
+        placement,
+        on_window,
         unsaved: None,
         instance,
         spawn,

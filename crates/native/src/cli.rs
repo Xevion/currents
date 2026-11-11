@@ -8,6 +8,7 @@ pub(crate) use currents_core::View;
 use currents_core::renderer::FieldView;
 use currents_core::settings::Settings;
 use currents_core::shaders::{self, Sources};
+use currents_core::viewer::Placement;
 use currents_core::{ParamBlock, ParamOverride};
 pub(crate) use size::OutputSize;
 
@@ -22,6 +23,8 @@ use crate::export::encode::Format;
 pub(crate) struct Cli {
     #[command(flatten)]
     pub(crate) common: Common,
+    #[command(flatten)]
+    pub(crate) place: Place,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -96,6 +99,42 @@ impl Common {
         }
         ParamOverride::apply(&self.params, &mut settings.params.0);
     }
+}
+
+/// Where the viewer's window goes. Either wallpaper placement locks the view for the run, so
+/// clicks on the desktop never move it.
+#[derive(Args, Clone)]
+pub(crate) struct Place {
+    /// Sit behind every other window as an X11 desktop wallpaper, on every workspace and in no
+    /// taskbar (GNOME draws its own desktop over it; use --embed with xwinwrap there)
+    #[arg(long, conflicts_with = "embed")]
+    pub(crate) x11_desktop: bool,
+    /// The monitor for --x11-desktop, by name as xrandr lists it or by index; the primary one by default
+    #[arg(long, requires = "x11_desktop")]
+    pub(crate) monitor: Option<String>,
+    /// Draw inside the X11 window WID, decimal or 0x hex, as `xwinwrap -ov -fs -- currents --embed WID` passes it
+    #[arg(long, value_name = "WID", value_parser = parse_wid)]
+    pub(crate) embed: Option<u32>,
+}
+
+impl Place {
+    pub(crate) fn placement(&self) -> Placement {
+        match (self.x11_desktop, self.embed) {
+            (true, _) => Placement::Desktop { monitor: self.monitor.clone() },
+            (false, Some(parent)) => Placement::Embed(parent),
+            (false, None) => Placement::Window,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_wid(text: &str) -> Result<u32, String> {
+    crate::x11::parse_xid(text)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn parse_wid(_: &str) -> Result<u32, String> {
+    Err("only X11 can embed the viewer".to_owned())
 }
 
 #[derive(Subcommand)]

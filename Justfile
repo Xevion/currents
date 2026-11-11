@@ -16,7 +16,7 @@ test:
 
 # Run the viewer end to end in real windows on a virtual X display, never on the desktop.
 test-display:
-    CURRENTS_TEST_DISPLAY=1 xvfb-run -a -s "-screen 0 1920x1080x24" cargo nextest run -p currents-core --run-ignored only -E 'test(/e2e::/)'
+    CURRENTS_TEST_DISPLAY=1 xvfb-run -a -s "-screen 0 1920x1080x24" cargo nextest run -p currents-core -p currents --run-ignored only -E 'test(/e2e::|x11::/)'
 
 fmt:
     cargo fmt --all

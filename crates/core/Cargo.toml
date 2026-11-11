@@ -32,6 +32,9 @@ egui-winit = { version = "0.37", default-features = false }
 wasm-bindgen-futures = "0.4.80"
 web-sys = { version = "0.3.107", features = ["HtmlCanvasElement"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb = "0.13.2"
+
 [dev-dependencies]
 assert2.workspace = true
 egui_kittest = "0.37"

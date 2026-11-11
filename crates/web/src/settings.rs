@@ -2,7 +2,7 @@ use currents_core::ParamOverride;
 use currents_core::renderer::FieldView;
 use currents_core::settings::Settings;
 use currents_core::shaders::Sources;
-use currents_core::viewer::Launch;
+use currents_core::viewer::{Launch, Placement};
 use web_sys::UrlSearchParams;
 
 /// The console's log level from the page URL's `log` (`debug`, `trace`, ...); `info` without one.
@@ -57,5 +57,7 @@ pub(crate) fn from_url() -> Launch {
         debug: get("debug").and_then(|s| s.trim().parse::<FieldView>().ok()),
         store: None,
         issues,
+        placement: Placement::Window,
+        on_window: None,
     }
 }

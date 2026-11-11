@@ -6,11 +6,13 @@ mod cli;
 pub mod export;
 mod host_package;
 mod store;
+#[cfg(target_os = "linux")]
+mod x11;
 
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches};
 use cli::{Cli, Command};
-use currents_core::viewer::Launch;
+use currents_core::viewer::{Launch, Placement};
 use currents_core::{shaders, viewer};
 use snafu::{ResultExt, Snafu};
 use tracing_subscriber::EnvFilter;
@@ -37,6 +39,10 @@ fn launch(cli: &Cli, matches: &clap::ArgMatches) -> Result<Launch, Error> {
     let given = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
     let from_file = settings.clone();
     cli.common.overlay(&mut settings, given);
+    let placement = cli.place.placement();
+    if placement != Placement::Window {
+        settings.camera.locked = true;
+    }
     let overridden = currents_core::settings::toml::changed(&from_file, &settings);
     if !overridden.is_empty() {
         tracing::info!(?overridden, "flags override the settings file for this run");
@@ -48,8 +54,48 @@ fn launch(cli: &Cli, matches: &clap::ArgMatches) -> Result<Launch, Error> {
         debug: cli.common.debug,
         store: Some(Box::new(store)),
         issues,
+        on_window: Some(Box::new({
+            let placement = placement.clone();
+            move |window, _remote| place(&window, &placement)
+        })),
+        placement,
     })
 }
+
+/// Finishes `placement` once the window is up: the X11 hints a desktop window needs, or a
+/// thread that keeps an embedded one the size of its parent.
+#[cfg(target_os = "linux")]
+fn place(window: &std::sync::Arc<winit::window::Window>, placement: &Placement) {
+    let Some(id) = x11::xid(window) else {
+        if *placement != Placement::Window {
+            tracing::warn!("the window is not an X11 one; it stays an ordinary window");
+        }
+        return;
+    };
+    match placement {
+        Placement::Window => {},
+        Placement::Desktop { .. } => {
+            if let Err(error) = x11::mark_desktop(id) {
+                tracing::warn!(%error, "could not mark the window as the desktop's");
+            }
+        },
+        &Placement::Embed(parent) => {
+            let window = std::sync::Arc::clone(window);
+            std::thread::spawn(move || {
+                let followed = x11::follow_parent(parent, |width, height| {
+                    tracing::debug!(width, height, "parent resized");
+                    let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+                });
+                if let Err(error) = followed {
+                    tracing::warn!(%error, "stopped following the parent window's size");
+                }
+            });
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn place(_: &std::sync::Arc<winit::window::Window>, _: &Placement) {}
 
 /// Logs this program's own events at `info` and other crates' at `warn` to stderr, unless
 /// `RUST_LOG` says otherwise; takes in the `log` records wgpu emits.

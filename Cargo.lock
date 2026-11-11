@@ -740,6 +740,8 @@ dependencies = [
  "tracing-subscriber",
  "webpx",
  "wgpu",
+ "winit",
+ "x11rb",
 ]
 
 [[package]]
@@ -765,6 +767,7 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
+ "x11rb",
 ]
 
 [[package]]

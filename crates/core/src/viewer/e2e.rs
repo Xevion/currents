@@ -176,7 +176,15 @@ fn run(launch: Launch, steps: Vec<Step>) -> Vec<String> {
 }
 
 fn launch(settings: Settings) -> Launch {
-    Launch { settings, sources: Sources::embedded(), debug: None, store: None, issues: Vec::new() }
+    Launch {
+        settings,
+        sources: Sources::embedded(),
+        debug: None,
+        store: None,
+        issues: Vec::new(),
+        placement: super::Placement::Window,
+        on_window: None,
+    }
 }
 
 fn first_frames() -> Step {
@@ -414,4 +422,69 @@ fn a_remote_changes_settings_and_holds_the_viewer_still() {
     ];
     let problems = run(launch(Settings::default()), steps);
     check!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A mapped top-level window on the test display, standing in for xwinwrap's.
+fn parent_window(width: u16, height: u16) -> (x11rb::rust_connection::RustConnection, u32) {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt, CreateWindowAux, WindowClass};
+
+    let (conn, screen) = x11rb::connect(None).expect("the test display");
+    let root = conn.setup().roots[screen].root;
+    let id = conn.generate_id().expect("a window ID");
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        id,
+        root,
+        0,
+        0,
+        width,
+        height,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new(),
+    )
+    .expect("a parent window");
+    conn.map_window(id).expect("mapped");
+    conn.flush().expect("flushed");
+    (conn, id)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    Desktop,
+    DesktopByIndex,
+    DesktopOnAMissingMonitor,
+    Embedded,
+}
+
+#[rstest]
+#[ignore = "opens windows; run with `just test-display`"]
+fn every_wallpaper_placement_keeps_presenting(
+    #[values(Place::Desktop, Place::DesktopByIndex, Place::DesktopOnAMissingMonitor, Place::Embedded)] place: Place,
+) {
+    assert!(std::env::var_os(DISPLAY_GUARD).is_some(), "run it with `just test-display`");
+    let mut parent = None;
+    let placement = match place {
+        Place::Desktop => super::Placement::Desktop { monitor: None },
+        Place::DesktopByIndex => super::Placement::Desktop { monitor: Some("0".to_owned()) },
+        Place::DesktopOnAMissingMonitor => super::Placement::Desktop { monitor: Some("NOPE-9".to_owned()) },
+        Place::Embedded => {
+            let (conn, id) = parent_window(480, 270);
+            parent = Some(conn);
+            super::Placement::Embed(id)
+        },
+    };
+    let desktop = !matches!(place, Place::Embedded);
+    let mut launch = launch(Settings::default());
+    launch.placement = placement;
+    let steps = vec![first_frames().expect(move |app| {
+        let size = app.gfx.as_ref()?.window.inner_size();
+        // The virtual display is one 1920x1080 monitor, which a desktop window covers.
+        (desktop && (size.width, size.height) != (1920, 1080)).then(|| format!("a desktop window sized {size:?}"))
+    })];
+    let problems = run(launch, steps);
+    check!(problems.is_empty(), "{problems:#?}");
+    drop(parent);
 }
