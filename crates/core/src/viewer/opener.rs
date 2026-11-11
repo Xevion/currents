@@ -1,4 +1,4 @@
-//! Opening the menu without a keyboard: hold the right button on the ball.
+//! Opening the menu without a keyboard: hold the right button on the ball, or a finger anywhere.
 
 use web_time::{Duration, Instant};
 
@@ -8,6 +8,8 @@ pub(crate) const BALL_R: f32 = 0.1205;
 
 /// How long the button has to stay down on the ball.
 const HOLD: Duration = Duration::from_secs(1);
+/// How long a finger has to stay down, about the platform's long press.
+pub(crate) const TOUCH_HOLD: Duration = Duration::from_millis(500);
 
 /// Whether the cover point `p` lies on the ball.
 pub(crate) fn on_ball(p: [f32; 2]) -> bool {
@@ -15,16 +17,21 @@ pub(crate) fn on_ball(p: [f32; 2]) -> bool {
     dx.hypot(dy) <= BALL_R
 }
 
-/// A right-button hold in progress on the ball.
+/// A hold in progress: when it started and how long it has to last.
 #[derive(Default)]
 pub(crate) struct Opener {
-    since: Option<Instant>,
+    since: Option<(Instant, Duration)>,
 }
 
 impl Opener {
     /// The button went down; only a press on the ball starts a hold.
     pub(crate) fn press(&mut self, now: Instant, on_ball: bool) {
-        self.since = on_ball.then_some(now);
+        self.since = on_ball.then_some((now, HOLD));
+    }
+
+    /// A finger went down; it opens the menu after a shorter hold, wherever it is.
+    pub(crate) fn touch(&mut self, now: Instant) {
+        self.since = Some((now, TOUCH_HOLD));
     }
 
     /// The pointer moved; leaving the ball drops the hold.
@@ -40,12 +47,12 @@ impl Opener {
 
     /// The share of the hold done, while one is in progress.
     pub(crate) fn progress(&self, now: Instant) -> Option<f32> {
-        self.since.map(|t| ((now - t).as_secs_f32() / HOLD.as_secs_f32()).min(1.0))
+        self.since.map(|(t, hold)| ((now - t).as_secs_f32() / hold.as_secs_f32()).min(1.0))
     }
 
     /// True once when a hold completes, which also ends it.
     pub(crate) fn fired(&mut self, now: Instant) -> bool {
-        let done = self.since.is_some_and(|t| now - t >= HOLD);
+        let done = self.since.is_some_and(|(t, hold)| now - t >= hold);
         if done {
             self.since = None;
         }
@@ -94,6 +101,15 @@ mod tests {
         slid.press(t, true);
         slid.moved(false);
         check!(!slid.fired(t + HOLD));
+    }
+
+    #[test]
+    fn a_touch_hold_fires_sooner_than_the_button_hold() {
+        let t = Instant::now();
+        let mut opener = Opener::default();
+        opener.touch(t);
+        check!(!opener.fired(t + TOUCH_HOLD / 2));
+        check!(opener.fired(t + TOUCH_HOLD));
     }
 
     #[test]

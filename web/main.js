@@ -41,6 +41,14 @@ async function run() {
   glue.start(canvas, () => canvas.focus(), fail);
 }
 
+// The viewer leaves browser defaults alone; these block only the ones that fight it. Keys with
+// Ctrl, Alt or Meta and the function keys stay with the browser, so reload and devtools work.
+function viewerKey(event) {
+  return !event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d+$/.test(event.key);
+}
+canvas.addEventListener("keydown", (event) => viewerKey(event) && event.preventDefault());
+canvas.addEventListener("wheel", (event) => event.preventDefault(), { passive: false });
+canvas.addEventListener("pointerdown", () => canvas.focus());
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 document.addEventListener("gesturestart", (event) => event.preventDefault());
 run().catch(fail);

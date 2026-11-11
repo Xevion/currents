@@ -2,8 +2,10 @@ use crate::settings::CameraTuning;
 use crate::view::View;
 
 const MIN_HALF_HEIGHT: f32 = 0.002;
-/// Pixel scroll distance that counts as one line.
+/// Scroll distance in logical pixels that counts as one line.
 pub(crate) const PIXELS_PER_LINE: f32 = 40.0;
+/// The most lines one wheel event may zoom by, so an accelerated flick stays a few notches.
+const MAX_LINES: f32 = 3.0;
 /// Share of the view's height within which the shown view counts as arrived, well under a pixel.
 const ARRIVED: f32 = 2e-5;
 /// How far past the region input may ask for, in regions; only keeps the numbers finite.
@@ -176,9 +178,14 @@ impl Camera {
         }
     }
 
-    /// Zooms in by `lines` scroll lines (out when negative), keeping the point under `cursor` fixed.
+    /// Zooms in by `lines` scroll lines (out when negative), keeping the point under `cursor`
+    /// fixed. A wheel has no release to spring back from, so it stops at the region's edge
+    /// rather than pushing past it; a push it could not see would only make the next notches
+    /// in do nothing.
     pub(crate) fn zoom(&mut self, lines: f32, cursor: [f64; 2], viewport: Viewport) {
+        let lines = lines.clamp(-MAX_LINES, MAX_LINES);
         self.scale_extent(self.tuning.zoom_per_line.powf(-lines), cursor, viewport);
+        self.target = self.target.bounded(viewport);
     }
 
     /// Multiplies the visible extent by `factor`, keeping the point under `cursor` fixed.
@@ -248,11 +255,38 @@ mod tests {
     fn zoom_comes_to_rest_at_the_limits(#[case] lines: f32, #[case] limit: f32) {
         let viewport = Viewport::new(900, 900);
         let mut camera = Camera::default();
-        camera.zoom(lines, [100.0, 200.0], viewport);
+        for _ in 0..100 {
+            camera.zoom(lines, [100.0, 200.0], viewport);
+        }
         for _ in 0..600 {
             camera.advance(1.0 / 60.0, viewport);
         }
         check!(camera.shown.half_height.total_cmp(&limit).is_eq());
+    }
+
+    #[rstest]
+    fn after_scrolling_out_past_the_edge_the_first_notch_back_zooms_in(
+        #[values((900, 900), (1600, 600), (390, 844))] size: (u32, u32),
+    ) {
+        let viewport = Viewport::new(size.0, size.1);
+        let mut camera = Camera::default();
+        let cursor = [f64::from(size.0) * 0.8, f64::from(size.1) * 0.3];
+        for _ in 0..40 {
+            camera.zoom(-3.0, cursor, viewport);
+            camera.advance(1.0 / 120.0, viewport);
+        }
+        let widest = camera.target.half_height;
+        check!(close(widest, viewport.region()[1]));
+        camera.zoom(1.0, cursor, viewport);
+        check!(camera.target.half_height < widest * 0.9);
+    }
+
+    #[test]
+    fn one_wheel_event_zooms_by_a_few_lines_at_most() {
+        let viewport = Viewport::new(900, 900);
+        let mut camera = at([0.5, 0.5], 0.2);
+        camera.zoom(50.0, [450.0, 450.0], viewport);
+        check!(close(camera.target.half_height, 0.2 * camera.tuning.zoom_per_line.powf(-MAX_LINES)));
     }
 
     #[rstest]

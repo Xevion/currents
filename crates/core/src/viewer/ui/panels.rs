@@ -67,6 +67,20 @@ pub(crate) struct Menu {
 
 /// Where the menu opens.
 const MENU_START: egui::Pos2 = egui::pos2(24.0, 24.0);
+/// Screens narrower or shorter than these, in points, get the menu filling the screen and
+/// laid out for a thumb instead of the floating panel, which would not fit.
+const COMPACT_WIDTH: f32 = 700.0;
+const COMPACT_HEIGHT: f32 = 520.0;
+/// Space left round the menu when it fills the screen.
+const COMPACT_MARGIN: f32 = 8.0;
+/// Control height when the menu fills the screen, about a fingertip.
+const COMPACT_ROW: f32 = 36.0;
+
+/// Whether the screen is too small for the floating panel.
+fn compact(ctx: &egui::Context) -> bool {
+    let screen = ctx.content_rect();
+    screen.width() < COMPACT_WIDTH || screen.height() < COMPACT_HEIGHT
+}
 
 /// The parameter groups the Params tab pages between; the debug slot lives under Advanced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Display, VariantArray)]
@@ -173,6 +187,14 @@ fn whole(ui: &mut Ui, label: &str, value: &mut u32, range: RangeInclusive<u32>, 
 }
 
 fn flag(ui: &mut Ui, label: &str, value: &mut bool, help: &str) -> egui::Response {
+    if compact(ui.ctx()) {
+        return ui
+            .horizontal(|ui| {
+                let id = name(ui, label, help);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, value).labelled_by(id)).inner
+            })
+            .inner;
+    }
     let id = name(ui, label, help);
     let response = toggle(ui, value).labelled_by(id);
     ui.end_row();
@@ -215,22 +237,53 @@ fn slider(ui: &mut Ui, label: &str, value: &mut f32, range: RangeInclusive<f32>,
     ui.end_row();
 }
 
-/// Rows of name, control and an optional third column, all lined up.
+/// Rows of name, control and an optional third column, all lined up; on a small screen each
+/// name sits over its control instead, which then takes the full width.
 fn rows(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
+    if compact(ui.ctx()) {
+        ui.vertical(|ui| {
+            let room = ui.available_width();
+            let s = ui.spacing_mut();
+            s.slider_width = (room - s.interact_size.x - s.item_spacing.x).max(80.0);
+            add(ui);
+        });
+        return;
+    }
     egui::Grid::new(id).num_columns(3).spacing([16.0, 10.0]).show(ui, add);
 }
 
 fn param(ui: &mut Ui, spec: &ParamSpec, settings: &mut Settings) {
     let value = settings.params.get_mut(spec.slot);
-    float(ui, spec.label, value, spec.min..=spec.max, spec.help);
-    if *value != 0.0 && ui.small_button("reset").on_hover_text("Back to the designed value").clicked() {
-        *value = 0.0;
+    let reset = |ui: &mut Ui, value: &mut f32| {
+        if *value != 0.0 && ui.small_button("reset").on_hover_text("Back to the designed value").clicked() {
+            *value = 0.0;
+        }
+    };
+    if compact(ui.ctx()) {
+        let id = ui
+            .horizontal(|ui| {
+                let id = name(ui, spec.label, spec.help);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| reset(ui, value));
+                id
+            })
+            .inner;
+        let places = decimals(&(spec.min..=spec.max));
+        ui.add(egui::Slider::new(value, spec.min..=spec.max).fixed_decimals(places)).labelled_by(id);
+        return;
     }
+    float(ui, spec.label, value, spec.min..=spec.max, spec.help);
+    reset(ui, value);
     ui.end_row();
 }
 
 fn params(ui: &mut Ui, group: &mut ParamGroup, settings: &mut Settings) {
-    ui.horizontal(|ui| tabs(ui, group, ParamGroup::VARIANTS));
+    if compact(ui.ctx()) {
+        egui::ScrollArea::horizontal().id_salt("groups").show(ui, |ui| {
+            ui.horizontal(|ui| tabs(ui, group, ParamGroup::VARIANTS));
+        });
+    } else {
+        ui.horizontal(|ui| tabs(ui, group, ParamGroup::VARIANTS));
+    }
     ui.add_space(6.0);
     let shown = group.group();
     rows(ui, "params", |ui| {
@@ -383,6 +436,10 @@ impl Menu {
         if !self.open {
             return commands;
         }
+        if compact(ui.ctx()) {
+            self.show_compact(ui.ctx(), settings, info, &mut commands);
+            return commands;
+        }
         // Only the blank stretch of the tab row moves the window, so a drag that slips off a
         // slider never carries the whole menu with it.
         let mut moved = egui::Vec2::ZERO;
@@ -417,17 +474,9 @@ impl Menu {
                     });
                 });
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.6).show(
-                    ui,
-                    |ui| match self.tab {
-                        Tab::Params => params(ui, &mut self.group, settings),
-                        Tab::Render => render(ui, settings, info),
-                        Tab::Motion => motion(ui, settings, &mut commands),
-                        Tab::Wallpaper => wallpaper(ui, settings),
-                        Tab::Controls => controls(ui, settings, info, &mut commands),
-                        Tab::Advanced => advanced(ui, settings),
-                    },
-                );
+                egui::ScrollArea::vertical()
+                    .max_height(ui.ctx().content_rect().height() * 0.6)
+                    .show(ui, |ui| self.body(ui, settings, info, &mut commands));
                 ui.separator();
                 footer(ui, info, &mut commands);
             });
@@ -442,6 +491,56 @@ impl Menu {
         }
         commands
     }
+
+    fn body(&mut self, ui: &mut Ui, settings: &mut Settings, info: &Info, commands: &mut Vec<Command>) {
+        match self.tab {
+            Tab::Params => params(ui, &mut self.group, settings),
+            Tab::Render => render(ui, settings, info),
+            Tab::Motion => motion(ui, settings, commands),
+            Tab::Wallpaper => wallpaper(ui, settings),
+            Tab::Controls => controls(ui, settings, info, commands),
+            Tab::Advanced => advanced(ui, settings),
+        }
+    }
+
+    /// The menu over the whole of a small screen: tabs that scroll sideways, then one column
+    /// of settings with the footer at its end, scrolling as one.
+    fn show_compact(&mut self, ctx: &egui::Context, settings: &mut Settings, info: &Info, commands: &mut Vec<Command>) {
+        let screen = ctx.content_rect().shrink(COMPACT_MARGIN);
+        let frame = egui::Frame::window(&ctx.global_style());
+        let inset = frame.total_margin().sum();
+        egui::Window::new("Settings")
+            .title_bar(false)
+            .resizable(false)
+            .movable(false)
+            .collapsible(false)
+            .frame(frame)
+            .fixed_pos(screen.min)
+            .fixed_size(screen.size() - inset)
+            .show(ctx, |ui| {
+                let s = ui.spacing_mut();
+                s.interact_size.y = COMPACT_ROW;
+                s.button_padding.y = 9.0;
+                ui.horizontal(|ui| {
+                    let close = ui.spacing().interact_size.y;
+                    let room = ui.available_width() - close - ui.spacing().item_spacing.x;
+                    egui::ScrollArea::horizontal().id_salt("tabs").max_width(room).show(ui, |ui| {
+                        ui.horizontal(|ui| tabs(ui, &mut self.tab, Tab::VARIANTS));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if close_button(ui) {
+                            commands.push(Command::Close);
+                        }
+                    });
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().id_salt("body").auto_shrink(false).show(ui, |ui| {
+                    self.body(ui, settings, info, commands);
+                    ui.separator();
+                    footer(ui, info, commands);
+                });
+            });
+    }
 }
 
 #[cfg(test)]
@@ -449,7 +548,7 @@ mod tests {
     use assert2::check;
     use egui::accesskit::Role;
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use rstest::rstest;
 
     use super::*;
@@ -461,8 +560,12 @@ mod tests {
     }
 
     fn harness(tab: Tab, settings: Settings) -> Harness<'static, State> {
+        sized(tab, settings, [760.0, 760.0])
+    }
+
+    fn sized(tab: Tab, settings: Settings, size: [f32; 2]) -> Harness<'static, State> {
         let state = State { menu: Menu { open: true, tab, ..Menu::default() }, settings, commands: vec![] };
-        Harness::builder().with_size([760.0, 760.0]).build_ui_state(
+        Harness::builder().with_size(size).build_ui_state(
             |ui, state: &mut State| {
                 super::super::theme::install(ui.ctx());
                 let commands = state.menu.show(ui, &mut state.settings, &Info::default());
@@ -707,5 +810,67 @@ mod tests {
         let cap = harness.state().settings.render.max_pixels.expect("switched on") / MEGA;
         check!(((cap * 10.0).round() - cap * 10.0).abs() < 1e-3);
         check!(cap > 0.0);
+    }
+
+    /// Names of the tabs, which sit in a row that scrolls sideways and may run off the screen.
+    fn is_tab(label: &str) -> bool {
+        Tab::VARIANTS
+            .iter()
+            .map(ToString::to_string)
+            .chain(ParamGroup::VARIANTS.iter().map(ToString::to_string))
+            .any(|t| t == label)
+    }
+
+    #[rstest]
+    fn on_a_phone_every_control_fits_the_screen_and_sliders_take_its_width(
+        #[values(Tab::Params, Tab::Render, Tab::Motion, Tab::Wallpaper, Tab::Controls, Tab::Advanced)] tab: Tab,
+        #[values([390.0, 844.0], [360.0, 640.0], [844.0, 390.0])] size: [f32; 2],
+    ) {
+        let mut harness = sized(tab, Settings::default(), size);
+        harness.run();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
+        for role in [Role::Slider, Role::CheckBox, Role::Button, Role::SpinButton] {
+            for node in harness.query_all_by_role(role) {
+                let label = node.accesskit_node().label().unwrap_or_default();
+                if is_tab(&label) {
+                    continue;
+                }
+                let rect = node.rect();
+                check!(
+                    rect.left() >= screen.left() && rect.right() <= screen.right(),
+                    "{role:?} {label:?} at {rect:?}"
+                );
+            }
+        }
+        for slider in harness.query_all_by_role(Role::Slider) {
+            check!(slider.rect().width() > 0.5 * size[0], "slider only {:?} wide", slider.rect().width());
+        }
+        let close = harness.get_by_role_and_label(Role::Button, "Close").rect();
+        check!(screen.contains_rect(close));
+    }
+
+    #[test]
+    fn on_a_phone_the_close_button_and_tabs_answer_taps() {
+        let mut harness = sized(Tab::Params, Settings::default(), [390.0, 844.0]);
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Render").click();
+        harness.run();
+        check!(harness.state().menu.tab == Tab::Render);
+        harness.get_by_role_and_label(Role::Button, "Close").click();
+        harness.run();
+        check!(harness.state().commands.contains(&Command::Close));
+    }
+
+    #[test]
+    fn on_a_phone_a_switch_sits_on_its_label_row() {
+        let mut harness = sized(Tab::Wallpaper, Settings::default(), [390.0, 844.0]);
+        harness.run();
+        let label = harness.get_by_role_and_label(Role::Label, "Pause when hidden").rect();
+        let switch = harness.get_by_role_and_label(Role::CheckBox, "Pause when hidden").rect();
+        check!((label.center().y - switch.center().y).abs() < 4.0);
+        check!(switch.right() > 300.0, "the switch sits at the right edge");
+        harness.get_by_role_and_label(Role::CheckBox, "Pause when hidden").click();
+        harness.run();
+        check!(!harness.state().settings.wallpaper.pause_when_hidden);
     }
 }

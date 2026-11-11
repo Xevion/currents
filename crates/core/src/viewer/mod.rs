@@ -97,6 +97,8 @@ const RETRY_SECS: f64 = 0.05;
 const SAVE_AFTER: Duration = Duration::from_secs(1);
 /// Weight of the newest frame in the frame rate the menu shows.
 const FPS_SMOOTHING: f32 = 0.05;
+/// How far in logical pixels a held finger may drift and still be holding, not panning.
+const TOUCH_SLOP: f64 = 10.0;
 
 #[expect(clippy::struct_excessive_bools, reason = "independent pieces of the event loop's state")]
 struct App {
@@ -123,6 +125,10 @@ struct App {
     view: Option<FieldView>,
     paused: bool,
     hidden: bool,
+    /// Whether the window has keyboard focus; browsers slow the frames of a page without it.
+    focused: bool,
+    /// Whether the first touch has been told how to open the menu.
+    touch_hinted: bool,
     time: f64,
     last: Instant,
     fps: f32,
@@ -359,7 +365,10 @@ impl App {
     fn redraw(&mut self, el: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = self.advance_clock(now);
-        if self.settings.wallpaper.ball_opener && self.opener.fired(now) {
+        // A touch hold opens the menu whatever the ball setting says, as a phone has no other way to.
+        if (self.settings.wallpaper.ball_opener || self.touches.any()) && self.opener.fired(now) {
+            self.touches.forget();
+            self.camera.hold(false);
             self.set_menu(true);
         }
         if self.unsaved.is_some_and(|since| now - since >= SAVE_AFTER) {
@@ -370,7 +379,7 @@ impl App {
             g.canvas.apply(&self.drawn_with, &self.settings);
             self.drawn_with.clone_from(&self.settings);
         }
-        g.canvas.observe_frame(dt);
+        g.canvas.observe_frame(dt, self.passes, self.focused && !self.hidden);
         self.camera.advance(dt, g.canvas.viewport());
         let frame = g.acquire();
         let presented = frame.is_some();
@@ -392,11 +401,36 @@ impl App {
         self.schedule(el, now, presented);
     }
 
-    fn touch(&mut self, touch: Touch) {
+    /// Follows every finger, so one that lifts over the menu is never left counted as down,
+    /// but moves the camera or starts a hold only for touches the overlay passed on.
+    fn touch(&mut self, touch: Touch, consumed: bool) {
         let Some(g) = self.gfx.as_ref() else { return };
         let viewport = g.canvas.viewport();
-        self.camera.hold(matches!(touch.phase, TouchPhase::Started | TouchPhase::Moved));
-        match self.touches.event(touch.phase, touch.id, [touch.location.x, touch.location.y]) {
+        let slop = TOUCH_SLOP * g.window.scale_factor();
+        if consumed && touch.phase == TouchPhase::Started {
+            return;
+        }
+        if touch.phase == TouchPhase::Started && !self.touch_hinted && self.settings.wallpaper.hint {
+            self.touch_hinted = true;
+            if let Some(overlay) = self.overlay.as_mut() {
+                overlay.toast("Press and hold for settings".to_owned(), false);
+            }
+        }
+        let gesture = self.touches.event(touch.phase, touch.id, [touch.location.x, touch.location.y]);
+        self.camera.hold(self.touches.any());
+        match self.touches.still(slop) {
+            Some(at) => {
+                self.cursor = PhysicalPosition::new(at[0], at[1]);
+                if touch.phase == TouchPhase::Started {
+                    self.opener.touch(Instant::now());
+                }
+            },
+            None => self.opener.release(),
+        }
+        if consumed || self.settings.camera.locked {
+            return;
+        }
+        match gesture {
             Some(Gesture::Pan(delta)) => self.camera.pan(delta, viewport),
             Some(Gesture::Pinch { centre, pan, factor }) => {
                 self.camera.pan(pan, viewport);
@@ -439,15 +473,15 @@ impl App {
                 _ => self.opener.release(),
             },
             WindowEvent::MouseWheel { delta, .. } if !consumed && !locked => {
+                let Some(g) = self.gfx.as_ref() else { return };
+                // Pixel deltas arrive in physical pixels, so a high density screen would zoom further per notch.
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_LINE,
+                    MouseScrollDelta::PixelDelta(p) => (p.y / g.window.scale_factor()) as f32 / PIXELS_PER_LINE,
                 };
-                if let Some(g) = self.gfx.as_ref() {
-                    self.camera.zoom(lines, [self.cursor.x, self.cursor.y], g.canvas.viewport());
-                }
+                self.camera.zoom(lines, [self.cursor.x, self.cursor.y], g.canvas.viewport());
             },
-            WindowEvent::Touch(touch) if !consumed && !locked => self.touch(touch),
+            WindowEvent::Touch(touch) => self.touch(touch, consumed),
             _ => {},
         }
     }
@@ -465,7 +499,8 @@ impl ApplicationHandler<Started> for App {
         #[cfg(target_arch = "wasm32")]
         let attrs = {
             use winit::platform::web::WindowAttributesExtWebSys;
-            attrs.with_canvas(self.canvas.take()).with_prevent_default(true)
+            // The page blocks only the defaults the viewer needs gone, so browser shortcuts keep working.
+            attrs.with_canvas(self.canvas.take()).with_prevent_default(false)
         };
         let window = match el.create_window(attrs).context(CreateWindowSnafu) {
             Ok(window) => Arc::new(window),
@@ -538,6 +573,7 @@ impl ApplicationHandler<Started> for App {
                 }
             },
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Focused(focused) => self.focused = focused,
             WindowEvent::RedrawRequested => self.redraw(el),
             // A synthetic press is a key already held as the window gained focus, not a new one;
             // acting on it would run a toggle twice when focus and the press arrive together.
@@ -583,6 +619,8 @@ fn app(event_loop: &EventLoop<Started>, launch: Launch, hooks: Hooks, spawn: Box
         hooks,
         paused: false,
         hidden: false,
+        focused: true,
+        touch_hinted: false,
         time: 0.0,
         last: now,
         fps: 0.0,
