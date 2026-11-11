@@ -8,6 +8,7 @@ use strum::{Display, EnumMessage, VariantArray};
 
 use super::theme::{METRICS, PALETTE};
 use crate::params::PARAM_SLOTS;
+use crate::renderer::PassTimes;
 use crate::settings::{Action, CATALOG, Group, ParamSpec, Settings, limits};
 
 const MEGA: f32 = 1e6;
@@ -41,13 +42,28 @@ pub(crate) enum Command {
     Capture(Action),
 }
 
+/// What frames are shaded at, which an adaptive budget moves while frames run long.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Shading {
+    /// Pixels shaded per frame, before supersampling.
+    pub(crate) size: [u32; 2],
+    /// The window those pixels are scaled up to fill.
+    pub(crate) window: [u32; 2],
+    pub(crate) field_step: u32,
+    pub(crate) supersampling: u32,
+    /// Whether frames running long took the scale or the field below the settings.
+    pub(crate) lowered: bool,
+}
+
 /// What the menu shows but does not own.
 #[derive(Default)]
 pub(crate) struct Info {
-    /// Frames per second over the last moment, and the field and shade pass times.
+    /// Frames per second over the last moment.
     pub(crate) fps: f32,
-    pub(crate) field_ms: f32,
-    pub(crate) shade_ms: f32,
+    /// GPU time in each pass of a recent frame; `None` where the device does not time them.
+    pub(crate) passes: Option<PassTimes>,
+    /// What frames are shaded at now, once the viewer draws.
+    pub(crate) shading: Option<Shading>,
     /// Where settings are saved, when they are.
     pub(crate) location: Option<String>,
     /// Why settings are not being saved, when they are not.
@@ -453,7 +469,35 @@ fn render(ui: &mut Ui, settings: &mut Settings, info: &Info) {
         flag(ui, "Adapt to frame rate", &mut r.adaptive, "Shade fewer pixels while frames run long.");
     });
     ui.separator();
-    ui.label(format!("{:.0} fps  |  field {:.1} ms  |  shade {:.1} ms", info.fps, info.field_ms, info.shade_ms));
+    ui.label(match info.passes {
+        Some(p) => format!("{:.0} fps  |  field {:.1} ms  |  shade {:.1} ms", info.fps, p.field, p.shade),
+        None => format!("{:.0} fps  |  pass times unavailable on this device", info.fps),
+    });
+    if let Some(s) = info.shading {
+        ui.label(shading_text(&s));
+        if s.lowered {
+            let note = "Lowered while frames run long; it climbs back once they have room.";
+            ui.label(RichText::new(note).small().color(PALETTE.accent));
+        }
+    }
+}
+
+/// What frames are shaded at, as the Render tab shows it.
+fn shading_text(s: &Shading) -> String {
+    let [w, h] = s.size;
+    let [ww, wh] = s.window;
+    let mut parts = vec![if s.size == s.window {
+        format!("Shading every pixel, {w} x {h}")
+    } else {
+        format!("Shading {w} x {h} of {ww} x {wh} ({:.0}%)", 100.0 * f64::from(w) / f64::from(ww.max(1)))
+    }];
+    if s.field_step > 1 {
+        parts.push(format!("field step {}", s.field_step));
+    }
+    if s.supersampling > 1 {
+        parts.push(format!("{}x supersampled", s.supersampling));
+    }
+    parts.join(", ")
 }
 
 fn motion(ui: &mut Ui, settings: &mut Settings, commands: &mut Vec<Command>) {
@@ -984,6 +1028,55 @@ mod tests {
             harness.run();
             check!(harness.state().commands.contains(&Command::CopyLink));
         }
+    }
+
+    const FULL: Shading =
+        Shading { size: [1920, 1080], window: [1920, 1080], field_step: 1, supersampling: 1, lowered: false };
+
+    #[rstest]
+    #[case::every_pixel(FULL, "Shading every pixel, 1920 x 1080")]
+    #[case::capped(Shading { size: [960, 540], ..FULL }, "Shading 960 x 540 of 1920 x 1080 (50%)")]
+    #[case::coarse_field(Shading { size: [960, 540], field_step: 2, ..FULL }, "Shading 960 x 540 of 1920 x 1080 (50%), field step 2")]
+    #[case::supersampled(Shading { supersampling: 2, ..FULL }, "Shading every pixel, 1920 x 1080, 2x supersampled")]
+    fn the_render_tab_says_what_frames_are_shaded_at(#[case] shading: Shading, #[case] text: &str) {
+        check!(shading_text(&shading) == text);
+    }
+
+    fn render_tab(info: Info) -> Harness<'static, State> {
+        let state = State {
+            menu: Menu { open: true, tab: Tab::Render, ..Menu::default() },
+            settings: Settings::default(),
+            commands: vec![],
+        };
+        let mut harness = Harness::builder().with_size([760.0, 900.0]).build_ui_state(
+            move |ui, state: &mut State| {
+                super::super::theme::install(ui.ctx());
+                let commands = state.menu.show(ui, &mut state.settings, &info);
+                state.commands.extend(commands);
+            },
+            state,
+        );
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn pass_times_read_as_unavailable_rather_than_zero_where_the_device_has_none() {
+        let untimed = render_tab(Info { fps: 30.0, ..Info::default() });
+        check!(untimed.query_by_label_contains("pass times unavailable").is_some());
+        check!(untimed.query_by_label_contains("0.0 ms").is_none());
+        let timed =
+            render_tab(Info { fps: 30.0, passes: Some(PassTimes { field: 1.25, shade: 3.5 }), ..Info::default() });
+        check!(timed.query_by_label_contains("field 1.2 ms").is_some());
+        check!(timed.query_by_label_contains("unavailable").is_none());
+    }
+
+    #[rstest]
+    fn the_render_tab_says_when_frames_running_long_lowered_the_shading(#[values(false, true)] lowered: bool) {
+        let shading = Shading { size: [960, 540], field_step: 2, lowered, ..FULL };
+        let harness = render_tab(Info { shading: Some(shading), ..Info::default() });
+        check!(harness.query_by_label_contains("Shading 960 x 540").is_some());
+        check!(harness.query_by_label_contains("Lowered while frames run long").is_some() == lowered);
     }
 
     #[test]

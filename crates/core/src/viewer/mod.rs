@@ -21,7 +21,7 @@ pub use pacing::Conditions;
 use pacing::{Pacing, pacing};
 pub use scale::Budget;
 use snafu::{ResultExt, Snafu};
-use title::FrameCounter;
+use title::{FrameCounter, FrameRate};
 use touch::{Gesture, Touches};
 use ui::{Command, Info, Overlay, Painted, Ring};
 use web_time::{Duration, Instant};
@@ -160,8 +160,6 @@ impl Remote {
 const RETRY_SECS: f64 = 0.05;
 /// Seconds after the last change before settings are saved.
 const SAVE_AFTER: Duration = Duration::from_secs(1);
-/// Weight of the newest frame in the frame rate the menu shows.
-const FPS_SMOOTHING: f32 = 0.05;
 /// How far in logical pixels a held finger may drift and still be holding, not panning.
 const TOUCH_SLOP: f64 = 10.0;
 
@@ -202,8 +200,9 @@ struct App {
     touch_hinted: bool,
     time: f64,
     last: Instant,
-    fps: f32,
-    passes: PassTimes,
+    fps: FrameRate,
+    /// GPU time per pass of a recent frame, where the device times them.
+    passes: Option<PassTimes>,
     cursor: PhysicalPosition<f64>,
     modifiers: ModifiersState,
     dragging: bool,
@@ -241,13 +240,11 @@ impl App {
             self.time += f64::from(dt) * f64::from(self.settings.motion.speed);
         }
         self.last = now;
-        if dt > 0.0 {
-            self.fps += FPS_SMOOTHING * (dt.recip() - self.fps);
-        }
+        self.fps.observe(dt);
         dt
     }
 
-    fn update_title(&mut self, now: Instant, passes: PassTimes) {
+    fn update_title(&mut self, now: Instant, passes: Option<PassTimes>) {
         if cfg!(target_arch = "wasm32") {
             return;
         }
@@ -333,9 +330,9 @@ impl App {
 
     fn info(&self) -> Info {
         Info {
-            fps: self.fps,
-            field_ms: self.passes.field,
-            shade_ms: self.passes.shade,
+            fps: self.fps.fps(),
+            passes: self.passes,
+            shading: self.gfx.as_ref().map(|g| g.canvas.shading()),
             location: self.store.as_ref().and_then(|s| s.location()),
             problem: self.store.as_ref().and_then(|s| s.problem()),
             issues: self.issues.clone(),
@@ -843,8 +840,8 @@ fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<d
         touch_hinted: false,
         time: 0.0,
         last: now,
-        fps: 0.0,
-        passes: PassTimes::default(),
+        fps: FrameRate::default(),
+        passes: None,
         cursor: PhysicalPosition::new(0.0, 0.0),
         modifiers: ModifiersState::empty(),
         dragging: false,

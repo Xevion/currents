@@ -14,7 +14,7 @@ use winit::event::WindowEvent;
 use winit::window::Window;
 
 use self::panels::Menu;
-pub(crate) use self::panels::{Command, Info};
+pub(crate) use self::panels::{Command, Info, Shading};
 #[cfg(test)]
 pub(crate) use self::theme::install as install_theme;
 use self::theme::{METRICS, PALETTE};

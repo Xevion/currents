@@ -7,7 +7,7 @@ use winit::window::Window;
 
 use super::blit::Blit;
 use super::scale::RenderScale;
-use super::ui::Painted;
+use super::ui::{Painted, Shading};
 use super::{CreateSurfaceSnafu, Error, GpuSnafu, NoSurfaceConfigSnafu};
 use crate::camera::Viewport;
 use crate::gpu::{self, Gpu};
@@ -184,16 +184,16 @@ impl Canvas {
         self.physical = physical;
     }
 
-    /// Feeds the last frame's interval and pass times to the render scale; `watched` is false
-    /// while the page is hidden or unfocused, when the browser may slow frames on its own.
-    /// Counts a frame for the adaptive budget; `cap` is the frame rate the frames are held to.
-    pub(crate) fn observe_frame(&mut self, dt: f32, passes: PassTimes, watched: bool, cap: Option<u32>) {
+    /// Feeds the last frame's interval and pass times to the render scale. `watched` is false
+    /// while the page is hidden or unfocused, when the browser may slow frames on its own, and
+    /// `cap` is the frame rate the frames are held to.
+    pub(crate) fn observe_frame(&mut self, dt: f32, passes: Option<PassTimes>, watched: bool, cap: Option<u32>) {
         if !watched {
             self.scale.pause();
             return;
         }
-        let gpu = passes.field + passes.shade;
-        if self.scale.observe(dt, (gpu > 0.0).then_some(gpu / 1000.0), cap) {
+        let gpu = passes.map(|p| (p.field + p.shade) / 1000.0);
+        if self.scale.observe(dt, gpu, cap) {
             let size = self.size();
             info!(
                 scale = self.scale.scale(),
@@ -241,15 +241,28 @@ impl Canvas {
         Uniforms::new([size.width, size.height], self.supersampling(), self.field_step(), time, view, params)
     }
 
+    /// What frames are shaded at now, beside the window they fill.
+    pub(crate) fn shading(&self) -> Shading {
+        let size = self.size();
+        let window = self.target_size();
+        Shading {
+            size: [size.width, size.height],
+            window: [window.width, window.height],
+            field_step: self.field_step(),
+            supersampling: self.supersampling(),
+            lowered: self.scale.lowered(),
+        }
+    }
+
     /// Draws a frame over the whole of `target` and submits it; returns the pass times of the
-    /// latest frame read back.
+    /// latest frame read back, or `None` while the device has none to give.
     pub(crate) fn draw(
         &mut self,
         target: &wgpu::Texture,
         uniforms: &Uniforms,
         view: Option<FieldView>,
         overlay: Option<Painted>,
-    ) -> PassTimes {
+    ) -> Option<PassTimes> {
         let target_view = target.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
         let faulted = self.fault().is_some();
@@ -278,10 +291,10 @@ impl Canvas {
             self.egui.free_texture(id);
         }
         if faulted {
-            return PassTimes::default();
+            return None;
         }
         self.renderer.after_submit();
-        self.renderer.pass_ms(&self.device, false).unwrap_or_default()
+        self.renderer.pass_ms(&self.device, false)
     }
 
     /// Records the overlay over `target`; returns command buffers that must be submitted first.
@@ -455,14 +468,15 @@ impl Gfx {
         self.failed = 0;
     }
 
-    /// Renders a frame and presents it on `frame`; returns the pass times of the latest frame read back.
+    /// Renders a frame and presents it on `frame`; returns the pass times of the latest frame
+    /// read back, when the device times them.
     pub(crate) fn draw(
         &mut self,
         frame: wgpu::SurfaceTexture,
         uniforms: &Uniforms,
         view: Option<FieldView>,
         overlay: Option<Painted>,
-    ) -> PassTimes {
+    ) -> Option<PassTimes> {
         let passes = self.canvas.draw(&frame.texture, uniforms, view, overlay);
         self.window.pre_present_notify();
         self.canvas.queue.present(frame);

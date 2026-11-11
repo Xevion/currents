@@ -92,6 +92,11 @@ impl RenderScale {
         self.scale
     }
 
+    /// Whether running long has taken the scale or the field below what was asked for.
+    pub(crate) fn lowered(&self) -> bool {
+        self.scale < self.top || self.field_step != self.fine_step
+    }
+
     /// The size to render a window of `physical` pixels at.
     pub(crate) fn fit(&self, physical: PhysicalSize<u32>) -> PhysicalSize<u32> {
         let (w, h) = (f64::from(physical.width.max(1)), f64::from(physical.height.max(1)));
@@ -208,7 +213,9 @@ mod tests {
     fn slow_frames_coarsen_the_field_before_shrinking_the_scale() {
         let mut scale = RenderScale::new(Some(ADAPTIVE), 1);
         check!(!run(&mut scale, 1.0 / 60.0, 3.0));
+        check!(!scale.lowered());
         check!(run(&mut scale, 1.0 / 30.0, 0.6));
+        check!(scale.lowered());
         check!((scale.field_step(), scale.scale() < 1.0) == (COARSE_FIELD_STEP, false));
         check!(run(&mut scale, 1.0 / 30.0, 0.6));
         check!((scale.field_step(), scale.scale() < 1.0) == (COARSE_FIELD_STEP, true));
@@ -228,6 +235,7 @@ mod tests {
         check!(scale.scale().total_cmp(&MIN_SCALE).is_eq());
         run(&mut scale, 1.0 / 120.0, 30.0);
         check!((scale.scale(), scale.field_step()) == (1.0, 1));
+        check!(!scale.lowered());
     }
 
     #[test]

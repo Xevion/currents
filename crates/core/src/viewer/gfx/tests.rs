@@ -275,6 +275,28 @@ fn a_picture_shaded_smaller_fills_the_whole_window(#[case] cap: Option<f32>, #[c
     }
 }
 
+#[test]
+fn the_shading_report_follows_the_budget_and_what_slow_frames_lower() {
+    let physical = PhysicalSize::new(900, 700);
+    let mut settings = Settings::default();
+    settings.render.max_pixels = Some(*limits::MAX_PIXELS.start());
+    settings.render.adaptive = true;
+    let mut canvas = canvas(physical, &settings);
+    let before = canvas.shading();
+    check!(before.window == [900, 700]);
+    check!(before.size == [canvas.size().width, canvas.size().height]);
+    check!(before.size[0] < 900);
+    check!((before.field_step, before.lowered) == (1, false));
+
+    // Untimed frames well past the slow mark, as a struggling browser gives them.
+    for _ in 0..40 {
+        canvas.observe_frame(1.0 / 20.0, None, true, None);
+    }
+    let after = canvas.shading();
+    check!(after.lowered);
+    check!(after.field_step > 1 || after.size[0] < before.size[0]);
+}
+
 /// The file the menu wrote that froze the viewer at launch.
 const FROZE_AT_LAUNCH: &str = "[params]\nobstacle_scale = 0.21\nglare_gain = 0.3\nband_edge_tone = 0.06\nband_width_jitter = -0.05\nspray_mottle = 0.045\n\n[render]\nsupersampling = 1\nadaptive = false\nmax_pixels = 800000.0\nfield_step = 1\nfps_cap = 0\n";
 
