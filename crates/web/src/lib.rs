@@ -93,6 +93,26 @@ fn value_of(value: &JsValue) -> Result<Option<Value>, String> {
     value.as_string().map(|s| Some(Value::from(s))).ok_or_else(|| "expected a number, boolean or text".to_owned())
 }
 
+/// Puts a link to `settings` in the address bar and on the clipboard. The link names only
+/// what differs from a page with nothing in its URL.
+fn share(settings: &currents_core::settings::Settings) -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or("no window")?;
+    let params = web_sys::UrlSearchParams::new()?;
+    for (path, value) in currents_core::settings::toml::to_pairs(&settings::base(), settings) {
+        params.append(&path, &value);
+    }
+    let location = window.location();
+    let query = String::from(params.to_string());
+    let mut url = format!("{}{}", location.origin()?, location.pathname()?);
+    if !query.is_empty() {
+        url = format!("{url}?{query}");
+    }
+    window.history()?.replace_state_with_url(&JsValue::NULL, "", Some(&url))?;
+    // The clipboard answers later; a refusal still leaves the link in the address bar.
+    let _ = window.navigator().clipboard().write_text(&url);
+    Ok(())
+}
+
 /// Starts the viewer on `canvas`. `on_ready()` runs after the first frame and `on_error(message)`
 /// on any failure that stops it.
 #[wasm_bindgen]
@@ -105,6 +125,11 @@ pub fn start(canvas: HtmlCanvasElement, on_ready: Function, on_error: Function) 
         on_error: Some(Box::new(|message| {
             log::error!("{message}");
             report(&message);
+        })),
+        share: Some(Box::new(|settings| {
+            if let Err(error) = share(settings) {
+                log::warn!("could not share the settings: {error:?}");
+            }
         })),
     };
     viewer::spawn(settings::from_url(), canvas, hooks)

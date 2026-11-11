@@ -223,14 +223,59 @@ fn write(doc: &mut DocumentMut, old: Option<&Table>, new: &Settings) -> bool {
 pub fn changed(old: &Settings, new: &Settings) -> Vec<String> {
     let (old, new) = (tree(old), tree(new));
     let value_at = |t: &Table, path: &[String]| lookup(t, path).and_then(Item::as_value).map(bare);
-    let mut paths: Vec<String> = leaves_of(&new)
-        .into_iter()
-        .chain(leaves_of(&old))
-        .filter(|(path, _)| value_at(&old, path) != value_at(&new, path))
-        .map(|(path, _)| path.join("."))
-        .collect();
-    paths.dedup();
+    let mut paths: Vec<String> = Vec::new();
+    // A path in both trees comes up twice; each is listed once, in the order first seen.
+    for (path, _) in leaves_of(&new).into_iter().chain(leaves_of(&old)) {
+        let dotted = path.join(".");
+        if value_at(&old, &path) != value_at(&new, &path) && !paths.contains(&dotted) {
+            paths.push(dotted);
+        }
+    }
     paths
+}
+
+/// The word a link uses for an optional setting switched off.
+const OFF: &str = "off";
+
+/// The settings that differ from `base` as `path=value` pairs for a link, each value as the
+/// settings file writes it, text without quotes, and `off` for a limit switched off.
+pub fn to_pairs(base: &Settings, settings: &Settings) -> Vec<(String, String)> {
+    let new = tree(settings);
+    changed(base, settings)
+        .into_iter()
+        .map(|dotted| {
+            let path: Path = dotted.split('.').map(str::to_owned).collect();
+            let value = match lookup(&new, &path).and_then(Item::as_value) {
+                Some(Value::String(s)) => s.value().clone(),
+                Some(value) => bare(value),
+                None => OFF.to_owned(),
+            };
+            (dotted, value)
+        })
+        .collect()
+}
+
+/// `settings` with `pairs` from a link laid over them, each read as `assign` would; a pair
+/// that cannot apply is reported and skipped.
+pub fn from_pairs<'a>(
+    settings: &Settings,
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> (Settings, Vec<Issue>) {
+    let mut settings = settings.clone();
+    let mut issues = Vec::new();
+    for (path, text) in pairs {
+        let text = text.trim();
+        // Text that does not read as a TOML value, like a key chord, is taken as text.
+        let value = (text != OFF).then(|| text.parse::<Value>().unwrap_or_else(|_| Value::from(text)));
+        match assign(&settings, path, value) {
+            Ok((next, moved)) => {
+                settings = next;
+                issues.extend(moved);
+            },
+            Err(issue) => issues.push(issue),
+        }
+    }
+    (settings, issues)
 }
 
 /// Removes the value at `path`; true when there was one.
@@ -395,6 +440,49 @@ mine = "kept"
         assert!(let Ok((new, _)) = assign(&settings, "render.fps_cap", None));
         check!(new.render.fps_cap.is_none());
         check!(new.render == crate::settings::Render { fps_cap: None, ..settings.render });
+    }
+
+    #[test]
+    fn a_link_carries_every_change_and_reads_back_the_same() {
+        let base = Settings::schema();
+        for (name, change) in crate::viewer::testing::extremes() {
+            let mut changed = base.clone();
+            change(&mut changed);
+            changed.clamp();
+            let pairs = to_pairs(&base, &changed);
+            let (read, issues) = from_pairs(&base, pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+            check!(issues.is_empty(), "{name}: {issues:?}");
+            check!(read == changed, "{name}: {pairs:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_switches_limits_off_and_takes_key_chords_as_written() {
+        let base = Settings::schema();
+        let mut changed = base.clone();
+        changed.render.fps_cap = None;
+        changed.keys.toggle_menu = "Ctrl+KeyM".parse().unwrap();
+        changed.motion.speed = 2.0;
+        changed.render.temporal = false;
+        let pairs = to_pairs(&base, &changed);
+        let mut keys: Vec<_> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        keys.sort_unstable();
+        check!(keys == ["keys.toggle_menu", "motion.speed", "render.fps_cap", "render.temporal"]);
+        check!(pairs.contains(&("render.fps_cap".to_owned(), "off".to_owned())));
+        check!(pairs.contains(&("keys.toggle_menu".to_owned(), "Ctrl+KeyM".to_owned())));
+        let (read, issues) = from_pairs(&base, pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        check!(issues.is_empty());
+        check!(read == changed);
+    }
+
+    #[test]
+    fn a_link_with_a_bad_pair_keeps_the_rest() {
+        let (read, issues) = from_pairs(
+            &Settings::default(),
+            [("motion.speed", "2"), ("render.sparkles", "1"), ("render.temporal", "maybe")],
+        );
+        check!(read.motion.speed.total_cmp(&2.0).is_eq());
+        check!(issues.iter().map(|i| i.path.as_str()).collect::<Vec<_>>() == ["render.sparkles", "render.temporal"]);
     }
 
     #[test]

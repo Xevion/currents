@@ -35,6 +35,8 @@ pub(crate) enum Command {
     ResetDefaults,
     OpenFile,
     CopyPath,
+    /// Share the settings as a link, through the page.
+    CopyLink,
     /// Wait for the next key press and bind it to the action.
     Capture(Action),
 }
@@ -50,10 +52,12 @@ pub(crate) struct Info {
     pub(crate) location: Option<String>,
     /// Why settings are not being saved, when they are not.
     pub(crate) problem: Option<String>,
-    /// Problems the settings file had when it was read.
+    /// Problems the starting settings had, from the settings file or the page's link.
     pub(crate) issues: Vec<String>,
     /// The action waiting for its new key.
     pub(crate) capturing: Option<Action>,
+    /// Whether the page can share the settings as a link.
+    pub(crate) can_share: bool,
 }
 
 #[derive(Default)]
@@ -564,6 +568,9 @@ fn footer(ui: &mut Ui, info: &Info, commands: &mut Vec<Command>) {
         if ui.button("Reset to defaults").clicked() {
             commands.push(Command::ResetDefaults);
         }
+        if info.can_share && ui.button("Copy link").on_hover_text("A link that opens with these settings").clicked() {
+            commands.push(Command::CopyLink);
+        }
         if info.location.is_some() {
             if ui.button("Open TOML").clicked() {
                 commands.push(Command::OpenFile);
@@ -951,6 +958,32 @@ mod tests {
         harness.get_by_role_and_label(Role::CheckBox, "Hint at the menu key").click();
         harness.run();
         check!(!harness.state().settings.wallpaper.hint);
+    }
+
+    #[rstest]
+    fn copy_link_shows_only_where_the_page_can_share(#[values(false, true)] can_share: bool) {
+        let state = State {
+            menu: Menu { open: true, tab: Tab::Wallpaper, ..Menu::default() },
+            settings: Settings::default(),
+            commands: vec![],
+        };
+        let mut harness = Harness::builder().with_size([760.0, 760.0]).build_ui_state(
+            move |ui, state: &mut State| {
+                super::super::theme::install(ui.ctx());
+                let info = Info { can_share, ..Info::default() };
+                let commands = state.menu.show(ui, &mut state.settings, &info);
+                state.commands.extend(commands);
+            },
+            state,
+        );
+        harness.run();
+        let button = harness.query_by_label("Copy link");
+        check!(button.is_some() == can_share);
+        if let Some(button) = button {
+            button.click();
+            harness.run();
+            check!(harness.state().commands.contains(&Command::CopyLink));
+        }
     }
 
     #[test]

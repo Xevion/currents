@@ -24,6 +24,14 @@ pub(crate) fn extremes() -> Vec<Step> {
         ("speed top".into(), Box::new(|s| s.motion.speed = *limits::SPEED.end())),
         ("camera locked".into(), Box::new(|s| s.camera.locked = true)),
         ("give at the top".into(), Box::new(|s| s.camera.give = *limits::GIVE.end())),
+        ("no pause when hidden".into(), Box::new(|s| s.wallpaper.pause_when_hidden = false)),
+        ("no pause under fullscreen".into(), Box::new(|s| s.wallpaper.pause_under_fullscreen = false)),
+        ("pause on battery".into(), Box::new(|s| s.wallpaper.pause_on_battery = true)),
+        (
+            "battery frame rate limited".into(),
+            Box::new(|s| s.wallpaper.battery_fps_cap = Some(*limits::FPS_CAP.start())),
+        ),
+        ("battery frame rate free".into(), Box::new(|s| s.wallpaper.battery_fps_cap = None)),
     ];
     for spec in &CATALOG {
         let slot = spec.slot;

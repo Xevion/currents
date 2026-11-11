@@ -6,7 +6,7 @@ mod opener;
 mod pacing;
 mod scale;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 mod title;
 mod touch;
 mod ui;
@@ -101,11 +101,16 @@ pub enum Placement {
     Embed(u32),
 }
 
-/// Page callbacks: `on_ready` after the first frame, `on_error` with the reason the viewer stopped.
+/// What a page shares settings with; the menu offers Copy link only when there is one.
+pub type Share = Box<dyn FnMut(&Settings)>;
+
+/// Page callbacks: `on_ready` after the first frame, `on_error` with why the viewer stopped.
 #[derive(Default)]
 pub struct Hooks {
     pub on_ready: Option<Box<dyn FnOnce()>>,
     pub on_error: Option<Box<dyn FnMut(String)>>,
+    /// Takes the settings the menu's Copy link button shares.
+    pub share: Option<Share>,
 }
 
 /// A future the platform drives to completion: native blocks on it, the web spawns it.
@@ -335,6 +340,7 @@ impl App {
             problem: self.store.as_ref().and_then(|s| s.problem()),
             issues: self.issues.clone(),
             capturing: self.capturing,
+            can_share: self.hooks.share.is_some(),
         }
     }
 
@@ -371,6 +377,14 @@ impl App {
                 let result = self.store.as_ref().map(|s| s.open());
                 if let (Some(Err(reason)), Some(overlay)) = (result, self.overlay.as_mut()) {
                     overlay.toast(format!("Could not open the settings file: {reason}"), true);
+                }
+            },
+            Command::CopyLink => {
+                if let Some(share) = self.hooks.share.as_mut() {
+                    share(&self.settings);
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.toast("Copied a link to these settings".to_owned(), false);
+                    }
                 }
             },
             Command::CopyPath => {
@@ -650,7 +664,10 @@ impl ApplicationHandler<Event> for App {
                 let mut overlay = Overlay::new(&gfx.window, gfx.canvas.max_texture_side());
                 if !self.issues.is_empty() {
                     let n = self.issues.len();
-                    overlay.toast(format!("The settings file had {n} problem(s); see the menu"), true);
+                    // Native settings come from the file; a page's come from its link.
+                    let source = if self.store.is_some() { "settings file" } else { "link" };
+                    let what = if n == 1 { "1 setting".to_owned() } else { format!("{n} settings") };
+                    overlay.toast(format!("{what} in the {source} could not be used; see the menu"), true);
                 }
                 self.overlay = Some(overlay);
                 self.last = Instant::now();
