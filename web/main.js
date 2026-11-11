@@ -46,6 +46,26 @@ function devicePixelBoxAgrees() {
   });
 }
 
+// Classic scripts, unlike modules, load from a page opened from disk.
+function loadScript(name) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `assets/${name}`;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`Could not load ${name}.`));
+    document.head.append(script);
+  });
+}
+
+async function inlined(name) {
+  await loadScript(name);
+  const text = atob(window.currentsWasm);
+  delete window.currentsWasm;
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  return bytes;
+}
+
 async function run() {
   if (!(await devicePixelBoxAgrees())) {
     delete ResizeObserverEntry.prototype.devicePixelContentBoxSize;
@@ -55,9 +75,13 @@ async function run() {
     fail("This browser has neither WebGPU nor WebGL2 with float render targets.");
     return;
   }
-  const glue = await import(`./${bundle.js}`);
-  await glue.default({ module_or_path: new URL(bundle.wasm, import.meta.url) });
-  glue.start(canvas, () => canvas.focus(), fail);
+  await loadScript(bundle.js);
+  // A wallpaper package carries the module inside a script, since a page opened from disk
+  // may not fetch files beside it.
+  const wasm = bundle.data ? await inlined(bundle.data) : new URL(`assets/${bundle.wasm}`, document.baseURI);
+  await wasm_bindgen({ module_or_path: wasm });
+  window.currents = wasm_bindgen.start(canvas, () => canvas.focus(), fail);
+  document.dispatchEvent(new Event("currents:ready"));
 }
 
 // The viewer leaves browser defaults alone; these block only the ones that fight it. Keys with

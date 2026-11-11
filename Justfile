@@ -48,17 +48,29 @@ profile *args:
 wasm_features := "--enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types"
 
 # Build the WebGPU and WebGL2 bundles and assemble dist/; mise supplies wasm-bindgen and wasm-opt.
-web:
+web: _web-bundles
+    python3 -I web/build.py
+
+_web-bundles:
     mise install --quiet
     just _web-bundle webgpu
     just _web-bundle webgl
-    python3 -I web/build.py
 
 # One wasm bundle, built with only `backend`'s wgpu feature and written to target/web/<backend>.
 _web-bundle backend:
     cargo build -q --profile web --target wasm32-unknown-unknown -p currents-web --no-default-features --features {{backend}}
-    mise exec -- wasm-bindgen --target web --no-typescript --remove-name-section --remove-producers-section --out-dir target/web/{{backend}} --out-name currents target/wasm32-unknown-unknown/web/currents_web.wasm
+    mise exec -- wasm-bindgen --target no-modules --no-typescript --remove-name-section --remove-producers-section --out-dir target/web/{{backend}} --out-name currents target/wasm32-unknown-unknown/web/currents_web.wasm
     mise exec -- wasm-opt -Oz {{wasm_features}} target/web/{{backend}}/currents_bg.wasm -o target/web/{{backend}}/currents_bg.wasm
+
+# Package the viewer as a Wallpaper Engine web wallpaper in out/we; import its project.json.
+we: _web-bundles
+    python3 -I web/build.py --package out/we
+    cargo run -q -p currents -- host-package we out/we
+
+# Package the viewer as a Lively web wallpaper in out/lively; add the folder or zip it.
+lively: _web-bundles
+    python3 -I web/build.py --package out/lively
+    cargo run -q -p currents -- host-package lively out/lively
 
 # Build dist/ and upload it as an assets-only Worker served at currents.xevion.dev.
 deploy: web

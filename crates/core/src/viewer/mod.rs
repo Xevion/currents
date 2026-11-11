@@ -88,8 +88,38 @@ pub struct Hooks {
 /// A future the platform drives to completion: native blocks on it, the web spawns it.
 pub type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
 
-/// Carries the finished graphics setup from the startup future back to the event loop.
-struct Started(Result<Box<Gfx>, Error>);
+/// What reaches the event loop from outside it.
+enum Event {
+    /// The finished graphics setup, from the startup future.
+    Started(Result<Box<Gfx>, Error>),
+    /// One setting to change by dotted path; `None` switches an optional one off.
+    Assign(String, Option<settings::toml::Value>),
+    /// The host holding the viewer still, as a wallpaper host does while nothing shows it.
+    Hold(bool),
+}
+
+/// Changes a running viewer from outside its event loop, as a page or wallpaper host does.
+#[derive(Clone)]
+pub struct Remote(EventLoopProxy<Event>);
+
+impl Remote {
+    /// Changes the setting at dotted `path`, as in `motion.speed`; `None` switches an optional
+    /// one off. A value the setting cannot take is logged and changes nothing.
+    pub fn set(&self, path: impl Into<String>, value: Option<settings::toml::Value>) {
+        self.send(Event::Assign(path.into(), value));
+    }
+
+    /// Stops drawing while `held`, picking up where it left off once released.
+    pub fn hold(&self, held: bool) {
+        self.send(Event::Hold(held));
+    }
+
+    fn send(&self, event: Event) {
+        if self.0.send_event(event).is_err() {
+            tracing::debug!("the viewer has stopped; dropped a request");
+        }
+    }
+}
 
 /// Seconds to wait before asking again for a frame the surface did not give.
 const RETRY_SECS: f64 = 0.05;
@@ -112,7 +142,7 @@ struct App {
     unsaved: Option<Instant>,
     instance: wgpu::Instance,
     spawn: Box<dyn Fn(LocalFuture)>,
-    proxy: EventLoopProxy<Started>,
+    proxy: EventLoopProxy<Event>,
     #[cfg(target_arch = "wasm32")]
     canvas: Option<web_sys::HtmlCanvasElement>,
     starting: bool,
@@ -125,6 +155,8 @@ struct App {
     view: Option<FieldView>,
     paused: bool,
     hidden: bool,
+    /// Whether the host is holding the viewer still.
+    held: bool,
     /// Whether the window has keyboard focus; browsers slow the frames of a page without it.
     focused: bool,
     /// Whether the first touch has been told how to open the menu.
@@ -197,6 +229,32 @@ impl App {
         self.settings = new;
         if self.store.is_some() {
             self.unsaved.get_or_insert_with(Instant::now);
+        }
+    }
+
+    fn assign(&mut self, path: &str, value: Option<settings::toml::Value>) {
+        match settings::toml::assign(&self.settings, path, value) {
+            Ok((new, issues)) => {
+                for issue in &issues {
+                    tracing::warn!(%issue, "setting held to its bounds");
+                }
+                tracing::info!(path, changed = ?settings::toml::changed(&self.settings, &new), "setting assigned");
+                self.change(new);
+            },
+            Err(issue) => tracing::warn!(%issue, "setting not changed"),
+        }
+    }
+
+    fn hold(&mut self, held: bool) {
+        if held == self.held {
+            return;
+        }
+        tracing::info!(held, "host hold");
+        self.held = held;
+        if !held && let Some(g) = self.gfx.as_ref() {
+            // The clock resumes from where it stopped instead of leaping over the hold.
+            self.last = Instant::now();
+            g.window.request_redraw();
         }
     }
 
@@ -335,7 +393,7 @@ impl App {
     /// spins the loop.
     fn schedule(&self, el: &ActiveEventLoop, started: Instant, presented: bool) {
         let Some(g) = self.gfx.as_ref() else { return };
-        if self.hidden && self.settings.wallpaper.pause_when_hidden {
+        if self.held || (self.hidden && self.settings.wallpaper.pause_when_hidden) {
             el.set_control_flow(ControlFlow::Wait);
             return;
         }
@@ -488,7 +546,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<Started> for App {
+impl ApplicationHandler<Event> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.starting {
             return;
@@ -511,15 +569,22 @@ impl ApplicationHandler<Started> for App {
             (self.instance.clone(), self.settings.clone(), self.sources.clone(), self.proxy.clone());
         (self.spawn)(Box::pin(async move {
             let gfx = Gfx::create(window, instance, &settings, &sources).await.map(Box::new);
-            if proxy.send_event(Started(gfx)).is_err() {
+            if proxy.send_event(Event::Started(gfx)).is_err() {
                 tracing::warn!("event loop closed before the viewer started");
             }
         }));
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, event: Started) {
-        match event.0 {
-            Ok(gfx) => {
+    fn user_event(&mut self, el: &ActiveEventLoop, event: Event) {
+        match event {
+            Event::Assign(path, value) => {
+                self.assign(&path, value);
+                if let Some(g) = self.gfx.as_ref() {
+                    g.window.request_redraw();
+                }
+            },
+            Event::Hold(held) => self.hold(held),
+            Event::Started(Ok(gfx)) => {
                 gfx.window.request_redraw();
                 let mut overlay = Overlay::new(&gfx.window, gfx.canvas.max_texture_side());
                 if !self.issues.is_empty() {
@@ -530,7 +595,7 @@ impl ApplicationHandler<Started> for App {
                 self.last = Instant::now();
                 self.gfx = Some(*gfx);
             },
-            Err(error) => self.fail(el, error),
+            Event::Started(Err(error)) => self.fail(el, error),
         }
     }
 
@@ -590,7 +655,7 @@ impl ApplicationHandler<Started> for App {
     }
 }
 
-fn app(event_loop: &EventLoop<Started>, launch: Launch, hooks: Hooks, spawn: Box<dyn Fn(LocalFuture)>) -> App {
+fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<dyn Fn(LocalFuture)>) -> App {
     #[cfg(not(target_arch = "wasm32"))]
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
         event_loop.owned_display_handle(),
@@ -620,6 +685,7 @@ fn app(event_loop: &EventLoop<Started>, launch: Launch, hooks: Hooks, spawn: Box
         hooks,
         paused: false,
         hidden: false,
+        held: false,
         focused: true,
         touch_hinted: false,
         time: 0.0,
@@ -649,14 +715,16 @@ pub fn run(launch: Launch) -> Result<(), Error> {
     app.failure.map_or(Ok(()), Err)
 }
 
-/// Starts the viewer on `canvas` under the browser's event loop and returns at once.
+/// Starts the viewer on `canvas` under the browser's event loop and returns at once, with the
+/// handle that changes it while it runs.
 #[cfg(target_arch = "wasm32")]
-pub fn spawn(launch: Launch, canvas: web_sys::HtmlCanvasElement, hooks: Hooks) -> Result<(), Error> {
+pub fn spawn(launch: Launch, canvas: web_sys::HtmlCanvasElement, hooks: Hooks) -> Result<Remote, Error> {
     use winit::platform::web::EventLoopExtWebSys;
 
     let event_loop = EventLoop::with_user_event().build().context(EventLoopSnafu)?;
+    let remote = Remote(event_loop.create_proxy());
     let mut app = app(&event_loop, launch, hooks, Box::new(wasm_bindgen_futures::spawn_local));
     app.canvas = Some(canvas);
     event_loop.spawn_app(app);
-    Ok(())
+    Ok(remote)
 }

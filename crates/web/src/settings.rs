@@ -5,6 +5,16 @@ use currents_core::shaders::Sources;
 use currents_core::viewer::Launch;
 use web_sys::UrlSearchParams;
 
+/// The console's log level from the page URL's `log` (`debug`, `trace`, ...); `info` without one.
+pub(crate) fn log_level() -> log::Level {
+    let search = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
+    UrlSearchParams::new_with_str(&search)
+        .ok()
+        .and_then(|p| p.get("log"))
+        .and_then(|level| level.parse().ok())
+        .unwrap_or(log::Level::Info)
+}
+
 /// Pixels shaded per frame before the render scale is applied; phones and laptops share
 /// their GPU with the compositor, so this sits well under a large desktop window.
 const MAX_PIXELS: f32 = 3_686_400.0;

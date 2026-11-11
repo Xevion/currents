@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-"""Assembles dist/ from the two wasm bundles and the page sources, under content-hashed names."""
+"""Assembles dist/ from the two wasm bundles and the page sources, under content-hashed names.
 
+With `--package DIR`, assembles a wallpaper host's copy in DIR instead, each wasm module carried
+inside a script so the page works when a host opens it from disk.
+"""
+
+import argparse
+import base64
 import gzip
 import hashlib
 import json
@@ -11,8 +17,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
-DIST = ROOT / "dist"
-ASSETS = DIST / "assets"
 BUNDLES = ROOT / "target" / "web"
 
 BACKENDS = ("webgpu", "webgl")
@@ -29,13 +33,22 @@ IMAGE_ALT = (
 )
 
 
-def emit(src: Path, name: str) -> str:
-    """Copies `src` into assets/ under a content-hashed name and returns that name."""
-    data = src.read_bytes()
+def emit(assets: Path, src: Path, name: str) -> str:
+    """Copies `src` into `assets` under a content-hashed name and returns that name."""
+    return emit_bytes(assets, src.read_bytes(), name, src.suffix)
+
+
+def emit_bytes(assets: Path, data: bytes, name: str, suffix: str) -> str:
     digest = hashlib.sha256(data).hexdigest()[:10]
-    out = f"{name}.{digest}{src.suffix}"
-    (ASSETS / out).write_bytes(data)
+    out = f"{name}.{digest}{suffix}"
+    (assets / out).write_bytes(data)
     return out
+
+
+def inline(assets: Path, wasm: Path, name: str) -> str:
+    """Writes `wasm` as a script that leaves it in `window.currentsWasm`, in base64."""
+    script = f'window.currentsWasm = "{base64.b64encode(wasm.read_bytes()).decode()}";\n'
+    return emit_bytes(assets, script.encode(), f"{name}.wasm", ".js")
 
 
 def fill(template: str, values: dict[str, str]) -> str:
@@ -43,21 +56,28 @@ def fill(template: str, values: dict[str, str]) -> str:
 
 
 def main() -> None:
-    shutil.rmtree(DIST, ignore_errors=True)
-    ASSETS.mkdir(parents=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--package", type=Path, help="assemble a wallpaper host's copy here")
+    args = parser.parse_args()
+    dist = args.package or ROOT / "dist"
+    assets = dist / "assets"
+    shutil.rmtree(dist, ignore_errors=True)
+    assets.mkdir(parents=True)
 
     manifest = {}
     for backend in BACKENDS:
         out = BUNDLES / backend
-        manifest[backend] = {
-            "js": emit(out / "currents.js", backend),
-            "wasm": emit(out / "currents_bg.wasm", backend),
-        }
+        manifest[backend] = {"js": emit(assets, out / "currents.js", backend)}
+        if args.package:
+            manifest[backend]["data"] = inline(assets, out / "currents_bg.wasm", backend)
+        else:
+            manifest[backend]["wasm"] = emit(assets, out / "currents_bg.wasm", backend)
 
-    css_name = emit(WEB / "style.css", "style")
-    js_name = emit(WEB / "main.js", "main")
+    css_name = emit(assets, WEB / "style.css", "style")
+    js_name = emit(assets, WEB / "main.js", "main")
+    host_name = emit(assets, WEB / "host.js", "host")
     preload = [
-        f'    <link rel="modulepreload" href="assets/{js_name}" />',
+        f'    <link rel="preload" href="assets/{js_name}" as="script" />',
         f'    <link rel="preload" href="assets/{css_name}" as="style" />',
     ]
     html = fill(
@@ -66,25 +86,28 @@ def main() -> None:
             "PRELOAD": "\n".join(preload),
             "CSS": css_name,
             "JS": js_name,
+            "HOST": host_name,
             "MANIFEST": json.dumps(manifest, separators=(",", ":")),
             "SITE": SITE,
             "DESCRIPTION": DESCRIPTION,
             "IMAGE_ALT": IMAGE_ALT,
-            "OG": emit(WEB / "og.jpg", "og"),
-            "ICON32": emit(WEB / "icon-32.png", "icon-32"),
-            "ICON180": emit(WEB / "icon-180.png", "icon-180"),
+            "OG": emit(assets, WEB / "og.jpg", "og"),
+            "ICON32": emit(assets, WEB / "icon-32.png", "icon-32"),
+            "ICON180": emit(assets, WEB / "icon-180.png", "icon-180"),
         },
     )
-    (DIST / "index.html").write_text(html)
-    shutil.copy(WEB / "_headers", DIST / "_headers")
+    (dist / "index.html").write_text(html)
+    if args.package:
+        shutil.copy(WEB / "og.jpg", dist / "preview.jpg")
+    else:
+        shutil.copy(WEB / "_headers", dist / "_headers")
+        report(assets, manifest)
 
-    report(manifest)
 
-
-def report(manifest: dict) -> None:
+def report(assets: Path, manifest: dict) -> None:
     print(f"{'bundle':<12} {'raw':>10} {'gzip':>10}", file=sys.stderr)
     for backend in BACKENDS:
-        data = (ASSETS / manifest[backend]["wasm"]).read_bytes()
+        data = (assets / manifest[backend]["wasm"]).read_bytes()
         print(f"{backend:<12} {len(data):>10} {len(gzip.compress(data, 9)):>10}", file=sys.stderr)
 
 

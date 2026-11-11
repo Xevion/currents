@@ -2,7 +2,9 @@
 //! display and open windows on it, so they run only under `just test-display`, which gives
 //! them a virtual one; they refuse to run without it rather than open windows on a desktop.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use assert2::{assert, check};
@@ -18,8 +20,9 @@ use winit::window::WindowId;
 
 use super::opener::{BALL_C, BALL_R};
 use super::testing::extremes;
-use super::{App, Hooks, Launch, Started, app};
-use crate::settings::{Settings, limits, toml};
+use super::{App, Event, Hooks, Launch, Remote, app};
+use crate::settings::toml::{self, Value};
+use crate::settings::{Settings, limits};
 use crate::shaders::Sources;
 
 /// Set by `just test-display` once a virtual display is up.
@@ -41,15 +44,23 @@ struct Step {
     at_once: Check,
     /// Checked once the step's frames are presented; returns a problem if there is one.
     expect: Check,
+    /// How long the step lasts when it waits on time instead of frames.
+    lasts: Option<Duration>,
 }
 
 fn step(name: impl Into<String>, act: impl FnMut(&mut App, &ActiveEventLoop) + 'static) -> Step {
-    Step { name: name.into(), act: Box::new(act), at_once: Box::new(|_| None), expect: Box::new(|_| None) }
+    Step { name: name.into(), act: Box::new(act), at_once: Box::new(|_| None), expect: Box::new(|_| None), lasts: None }
 }
 
 impl Step {
     fn expect(mut self, check: impl Fn(&App) -> Option<String> + 'static) -> Self {
         self.expect = Box::new(move |app| check(app));
+        self
+    }
+
+    /// Makes the step wait `time` rather than for frames, for a step that expects none.
+    const fn lasting(mut self, time: Duration) -> Self {
+        self.lasts = Some(time);
         self
     }
 
@@ -78,7 +89,8 @@ impl Script {
             return;
         }
         if let Some((step, until, since)) = &self.current {
-            if self.app.presented < *until {
+            let done = step.lasts.map_or(self.app.presented >= *until, |time| since.elapsed() >= time);
+            if !done {
                 if since.elapsed() > STEP_TIMEOUT {
                     self.problems.push(format!(
                         "{}: only {} frames presented in {:?}",
@@ -111,12 +123,12 @@ impl Script {
     }
 }
 
-impl ApplicationHandler<Started> for Script {
+impl ApplicationHandler<Event> for Script {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.app.resumed(el);
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, event: Started) {
+    fn user_event(&mut self, el: &ActiveEventLoop, event: Event) {
         self.app.user_event(el, event);
     }
 
@@ -139,7 +151,7 @@ fn run(launch: Launch, steps: Vec<Step>) -> Vec<String> {
         std::env::var_os(DISPLAY_GUARD).is_some(),
         "opens real windows; run it with `just test-display`, which gives it a virtual display"
     );
-    let event_loop = EventLoop::<Started>::with_user_event().with_any_thread(true).build().expect("an event loop");
+    let event_loop = EventLoop::<Event>::with_user_event().with_any_thread(true).build().expect("an event loop");
     let app = app(&event_loop, launch, Hooks::default(), Box::new(pollster::block_on));
     let mut script = Script { app, steps: steps.into(), current: None, problems: Vec::new() };
     let mut event_loop = event_loop;
@@ -363,5 +375,43 @@ fn shaders_that_do_not_compile_still_present_the_menu() {
     let event_loop_problems = run(launch, steps);
     // The steps above expect the fault, so only problems other than it count.
     let problems: Vec<_> = event_loop_problems.into_iter().filter(|p| !p.contains("drawing stopped")).collect();
+    check!(problems.is_empty(), "{problems:#?}");
+}
+
+fn remote(app: &App) -> Remote {
+    Remote(app.proxy.clone())
+}
+
+#[test]
+#[ignore = "opens windows; run with `just test-display`"]
+fn a_remote_changes_settings_and_holds_the_viewer_still() {
+    let presented_at_hold = Rc::new(Cell::new(0));
+    let at_hold = Rc::clone(&presented_at_hold);
+    let steps = vec![
+        first_frames(),
+        step("set the speed", |app, _| remote(app).set("motion.speed", Some(Value::from(2.5))))
+            .expect(|app| (app.settings.motion.speed.total_cmp(&2.5).is_ne()).then(|| "speed not set".to_owned())),
+        step("set what is not a setting", |app, _| remote(app).set("render.sparkles", Some(Value::from(true))))
+            .expect(|app| (app.settings.motion.speed.total_cmp(&2.5).is_ne()).then(|| "settings moved".to_owned())),
+        step("limit the frame rate past its bounds", |app, _| {
+            remote(app).set("render.fps_cap", Some(Value::from(9999)));
+        })
+        .expect(|app| {
+            (app.settings.render.fps_cap != Some(*limits::FPS_CAP.end())).then(|| "limit not held".to_owned())
+        }),
+        step("switch the limit off", |app, _| remote(app).set("render.fps_cap", None))
+            .expect(|app| app.settings.render.fps_cap.map(|cap| format!("limit still {cap}"))),
+        step("hold", move |app, _| {
+            at_hold.set(app.presented);
+            remote(app).hold(true);
+        })
+        .lasting(Duration::from_millis(600))
+        .expect(move |app| {
+            let since = app.presented - presented_at_hold.get();
+            (since > 2).then(|| format!("{since} frames presented while held"))
+        }),
+        step("release", |app, _| remote(app).hold(false)),
+    ];
+    let problems = run(launch(Settings::default()), steps);
     check!(problems.is_empty(), "{problems:#?}");
 }

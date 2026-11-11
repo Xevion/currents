@@ -4,6 +4,7 @@
 mod bench;
 mod cli;
 pub mod export;
+mod host_package;
 mod store;
 
 use clap::parser::ValueSource;
@@ -24,6 +25,8 @@ pub enum Error {
     Render { source: export::Error },
     #[snafu(display("the viewer failed"))]
     Viewer { source: viewer::Error },
+    #[snafu(display("could not package for the host"))]
+    HostPackage { source: host_package::Error },
     #[snafu(display("could not load the shaders"))]
     Shaders { source: shaders::Error },
 }
@@ -67,6 +70,7 @@ pub fn run() -> Result<(), Error> {
     match &cli.command {
         Some(Command::Render(args)) => export::run(&cli.common, args).context(RenderSnafu),
         Some(Command::Bench(args)) => bench::run(&cli.common, args).context(BenchSnafu),
+        Some(Command::HostPackage(args)) => host_package::run(args.host, &args.dir).context(HostPackageSnafu),
         None => viewer::run(launch(&cli, &matches)?).context(ViewerSnafu),
     }
 }

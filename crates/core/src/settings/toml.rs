@@ -2,7 +2,8 @@
 //! edited by hand keeps its comments, order and unknown keys.
 
 use snafu::{ResultExt, Snafu};
-use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
+pub use toml_edit::Value;
+use toml_edit::{DocumentMut, Item, Table, TableLike};
 
 use super::keys::Chord;
 use super::{Issue, Settings};
@@ -134,6 +135,35 @@ pub fn load(text: &str) -> Result<(Settings, Vec<Issue>), Error> {
     };
     issues.extend(settings.clamp());
     Ok((settings, issues))
+}
+
+/// `settings` with the setting at dotted `path` changed to `value`, held to its bounds.
+///
+/// `None` switches an optional setting off. A path that names no setting, a value of the wrong
+/// type, or `None` for a setting that cannot be off is refused and changes nothing.
+pub fn assign(settings: &Settings, path: &str, value: Option<Value>) -> Result<(Settings, Vec<Issue>), Issue> {
+    let path: Path = path.split('.').map(str::to_owned).collect();
+    let schema = tree(&Settings::schema());
+    let Some(default) = lookup(&schema, &path).and_then(Item::as_value) else {
+        return Err(issue(&path, "unknown setting"));
+    };
+    let mut merged = tree(settings);
+    match value {
+        Some(found) => {
+            let Some(value) = conformed(&found, default) else {
+                return Err(issue(&path, format!("expected {}, not {}", describe(default), bare(&found))));
+            };
+            set(&mut merged, &path, value);
+        },
+        None if lookup(&tree(&Settings::default()), &path).is_none() => {
+            remove(&mut merged, &path);
+        },
+        None => return Err(issue(&path, "cannot be switched off")),
+    }
+    let mut new: Settings = toml_edit::de::from_document(DocumentMut::from(merged))
+        .map_err(|error| issue(&path, format!("could not be read ({error})")))?;
+    let issues = new.clamp();
+    Ok((new, issues))
 }
 
 /// Writes `value` at `path`, keeping the comments around a value it replaces and making the
@@ -318,6 +348,53 @@ mine = "kept"
         check!(settings.render.fps_cap.is_none());
         check!(settings.render.max_pixels == Some(800_000.0));
         check!(settings.params.get(1).total_cmp(&0.21).is_eq());
+    }
+
+    #[test]
+    fn assigning_any_setting_its_own_value_changes_nothing() {
+        let settings = Settings::schema();
+        for (path, value) in leaves_of(&tree(&settings)) {
+            let dotted = path.join(".");
+            assert!(let Ok((new, issues)) = assign(&settings, &dotted, Some(value)), "{dotted}");
+            check!(new == settings, "{dotted}");
+            check!(issues.is_empty(), "{dotted}: {issues:?}");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::speed("motion.speed", Value::from(99.0), "4.0")]
+    #[case::whole_number_for_a_float("motion.speed", Value::from(2), "2.0")]
+    #[case::frame_rate("render.fps_cap", Value::from(1000), "240")]
+    #[case::no_frames_means_no_limit("render.fps_cap", Value::from(0), "")]
+    #[case::param("params.ball_spin", Value::from(-50.0), "-1.0")]
+    #[case::chord("keys.toggle_menu", Value::from("F1"), "\"F1\"")]
+    fn an_assigned_value_lands_inside_its_bounds(#[case] path: &str, #[case] value: Value, #[case] held: &str) {
+        assert!(let Ok((new, _)) = assign(&Settings::default(), path, Some(value)));
+        let path: Path = path.split('.').map(str::to_owned).collect();
+        let written = lookup(&tree(&new), &path).and_then(Item::as_value).map(bare).unwrap_or_default();
+        check!(written == held);
+        let mut new = new;
+        check!(new.clamp().is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::unknown("render.sparkles", Some(Value::from(true)))]
+    #[case::a_whole_table("render", Some(Value::from(true)))]
+    #[case::wrong_type("render.temporal", Some(Value::from("yes")))]
+    #[case::not_a_chord("keys.pause", Some(Value::from("Ctrl+Banana")))]
+    #[case::cannot_be_off("motion.speed", None)]
+    fn an_assignment_that_cannot_apply_is_refused(#[case] path: &str, #[case] value: Option<Value>) {
+        assert!(let Err(issue) = assign(&Settings::default(), path, value));
+        check!(issue.path == path);
+    }
+
+    #[test]
+    fn assigning_nothing_switches_a_limit_off() {
+        let mut settings = Settings::default();
+        settings.render.fps_cap = Some(30);
+        assert!(let Ok((new, _)) = assign(&settings, "render.fps_cap", None));
+        check!(new.render.fps_cap.is_none());
+        check!(new.render == crate::settings::Render { fps_cap: None, ..settings.render });
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 mod camera;
 pub mod gpu;
+pub mod hosts;
 pub mod params;
 pub mod renderer;
 pub mod settings;

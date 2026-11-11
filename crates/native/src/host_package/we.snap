@@ -1,0 +1,143 @@
+== project.json
+{
+  "title": "Currents",
+  "description": "Flowing stripes parting around a chrome ball, simulated and rendered live on your GPU.",
+  "type": "web",
+  "file": "index.html",
+  "preview": "preview.jpg",
+  "tags": [
+    "Abstract"
+  ],
+  "general": {
+    "properties": {
+      "motion_speed": {
+        "type": "slider",
+        "min": 0.0,
+        "max": 4.0,
+        "step": 0.05,
+        "value": 0.4,
+        "fraction": true,
+        "precision": 2,
+        "order": 100,
+        "text": "Speed"
+      },
+      "render_temporal": {
+        "type": "bool",
+        "value": true,
+        "order": 101,
+        "text": "Smooth across frames"
+      },
+      "render_supersampling": {
+        "type": "slider",
+        "min": 1.0,
+        "max": 4.0,
+        "step": 1.0,
+        "value": 1.0,
+        "fraction": false,
+        "precision": 0,
+        "order": 102,
+        "text": "Supersampling"
+      },
+      "render_render_scale": {
+        "type": "slider",
+        "min": 0.3,
+        "max": 1.0,
+        "step": 0.05,
+        "value": 1.0,
+        "fraction": true,
+        "precision": 2,
+        "order": 103,
+        "text": "Render scale"
+      },
+      "camera_locked": {
+        "type": "bool",
+        "value": true,
+        "order": 104,
+        "text": "Lock the view"
+      },
+      "wallpaper_hint": {
+        "type": "bool",
+        "value": false,
+        "order": 105,
+        "text": "Hint at the menu key"
+      },
+      "params_glare_gain": {
+        "type": "slider",
+        "min": -1.0,
+        "max": 2.0,
+        "step": 0.01,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 2,
+        "order": 106,
+        "text": "Glare brightness"
+      },
+      "params_band_edge_tone": {
+        "type": "slider",
+        "min": -0.8,
+        "max": 0.5,
+        "step": 0.01,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 2,
+        "order": 107,
+        "text": "Band edge tone"
+      },
+      "params_band_body_tone": {
+        "type": "slider",
+        "min": -0.4,
+        "max": 0.5,
+        "step": 0.001,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 3,
+        "order": 108,
+        "text": "Band body tone"
+      },
+      "params_fat_band_flatten": {
+        "type": "slider",
+        "min": -1.0,
+        "max": 1.0,
+        "step": 0.01,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 2,
+        "order": 109,
+        "text": "Fat band flattening"
+      },
+      "params_ball_spin": {
+        "type": "slider",
+        "min": -1.0,
+        "max": 1.0,
+        "step": 0.01,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 2,
+        "order": 110,
+        "text": "Ball spin rate"
+      },
+      "params_band_width_jitter": {
+        "type": "slider",
+        "min": -0.05,
+        "max": 0.3,
+        "step": 0.001,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 3,
+        "order": 111,
+        "text": "Band width jitter"
+      },
+      "params_spray_mottle": {
+        "type": "slider",
+        "min": -0.05,
+        "max": 0.3,
+        "step": 0.001,
+        "value": 0.0,
+        "fraction": true,
+        "precision": 3,
+        "order": 112,
+        "text": "Spray mottle"
+      }
+    }
+  }
+}

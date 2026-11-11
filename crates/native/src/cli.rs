@@ -104,6 +104,16 @@ pub(crate) enum Command {
     Render(RenderArgs),
     /// Time the GPU passes over views and sizes without opening a window
     Bench(BenchArgs),
+    /// Write a wallpaper host's files (we or lively) into a page `web/build.py --package` laid out
+    HostPackage(HostPackageArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct HostPackageArgs {
+    /// The host: we (Wallpaper Engine) or lively
+    pub(crate) host: currents_core::hosts::Host,
+    /// The packaged page's directory
+    pub(crate) dir: PathBuf,
 }
 
 /// A view together with the text it was given as.
