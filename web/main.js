@@ -30,7 +30,26 @@ async function pickBundle() {
   return webgl2Usable() ? manifest.webgl : null;
 }
 
+// The viewer sizes the canvas from `devicePixelContentBoxSize` but scales input and the menu by
+// `devicePixelRatio`. Where the two disagree (DevTools device emulation reports host pixels),
+// hiding the former makes it size from CSS pixels times the ratio, so every measure agrees.
+function devicePixelBoxAgrees() {
+  if (!("devicePixelContentBoxSize" in ResizeObserverEntry.prototype)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const observer = new ResizeObserver(([entry]) => {
+      observer.disconnect();
+      const device = entry.devicePixelContentBoxSize[0].inlineSize;
+      const css = entry.contentRect.width * devicePixelRatio;
+      resolve(Math.abs(device - css) <= 2);
+    });
+    observer.observe(canvas, { box: "device-pixel-content-box" });
+  });
+}
+
 async function run() {
+  if (!(await devicePixelBoxAgrees())) {
+    delete ResizeObserverEntry.prototype.devicePixelContentBoxSize;
+  }
   const bundle = await pickBundle();
   if (bundle === null) {
     fail("This browser has neither WebGPU nor WebGL2 with float render targets.");
