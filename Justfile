@@ -60,6 +60,10 @@ _web-bundle backend:
     mise exec -- wasm-bindgen --target web --no-typescript --remove-name-section --remove-producers-section --out-dir target/web/{{backend}} --out-name currents target/wasm32-unknown-unknown/web/currents_web.wasm
     mise exec -- wasm-opt -Oz {{wasm_features}} target/web/{{backend}}/currents_bg.wasm -o target/web/{{backend}}/currents_bg.wasm
 
+# Build dist/ and upload it as an assets-only Worker served at currents.xevion.dev.
+deploy: web
+    mise exec -- wrangler deploy
+
 # Serve dist/ locally with the production headers (default port 8080).
 web-serve port="8080":
     python3 -I web/serve.py dist {{port}}

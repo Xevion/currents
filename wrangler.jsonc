@@ -1,0 +1,8 @@
+{
+  "name": "currents",
+  "compatibility_date": "2026-11-10",
+  "assets": { "directory": "./dist" },
+  "routes": [{ "pattern": "currents.xevion.dev", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false
+}

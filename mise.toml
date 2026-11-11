@@ -2,3 +2,4 @@
 "aqua:WebAssembly/binaryen" = "latest"
 # Must match the `wasm-bindgen` crate pin in crates/web/Cargo.toml exactly.
 "github:wasm-bindgen/wasm-bindgen" = "0.2.130"
+"npm:wrangler" = "4.160.0"
