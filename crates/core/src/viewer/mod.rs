@@ -3,6 +3,7 @@ mod blit;
 mod e2e;
 mod gfx;
 mod opener;
+mod pacing;
 mod scale;
 #[cfg(test)]
 mod testing;
@@ -16,6 +17,8 @@ use std::sync::Arc;
 
 use gfx::Gfx;
 use opener::{Opener, on_ball};
+pub use pacing::Conditions;
+use pacing::{Pacing, pacing};
 pub use scale::Budget;
 use snafu::{ResultExt, Snafu};
 use title::FrameCounter;
@@ -116,6 +119,8 @@ enum Event {
     Assign(String, Option<settings::toml::Value>),
     /// The host holding the viewer still, as a wallpaper host does while nothing shows it.
     Hold(bool),
+    /// What the platform reports about the viewer's surroundings.
+    Conditions(Conditions),
 }
 
 /// Changes a running viewer from outside its event loop, as a page or wallpaper host does.
@@ -132,6 +137,11 @@ impl Remote {
     /// Stops drawing while `held`, picking up where it left off once released.
     pub fn hold(&self, held: bool) {
         self.send(Event::Hold(held));
+    }
+
+    /// Tells the viewer what the platform sees around it, which the pause settings act on.
+    pub fn conditions(&self, conditions: Conditions) {
+        self.send(Event::Conditions(conditions));
     }
 
     fn send(&self, event: Event) {
@@ -180,6 +190,7 @@ struct App {
     hidden: bool,
     /// Whether the host is holding the viewer still.
     held: bool,
+    conditions: Conditions,
     /// Whether the window has keyboard focus; browsers slow the frames of a page without it.
     focused: bool,
     /// Whether the first touch has been told how to open the menu.
@@ -273,9 +284,33 @@ impl App {
             return;
         }
         tracing::info!(held, "host hold");
+        let was = self.pacing();
         self.held = held;
-        if !held && let Some(g) = self.gfx.as_ref() {
-            // The clock resumes from where it stopped instead of leaping over the hold.
+        self.resume_if_woken(was);
+    }
+
+    fn observe(&mut self, conditions: Conditions) {
+        if conditions == self.conditions {
+            return;
+        }
+        tracing::info!(?conditions, "surroundings changed");
+        let was = self.pacing();
+        self.conditions = conditions;
+        self.resume_if_woken(was);
+    }
+
+    fn pacing(&self) -> Pacing {
+        let attended = self.overlay_live || self.overlay.as_ref().is_some_and(Overlay::menu_open);
+        pacing(&self.settings, self.conditions, self.hidden, self.held, attended)
+    }
+
+    /// Starts frames again after an idle spell, the clock picking up where it stopped instead
+    /// of leaping over the pause.
+    fn resume_if_woken(&mut self, was: Pacing) {
+        if was == Pacing::Idle
+            && self.pacing() != Pacing::Idle
+            && let Some(g) = self.gfx.as_ref()
+        {
             self.last = Instant::now();
             g.window.request_redraw();
         }
@@ -416,12 +451,14 @@ impl App {
     /// spins the loop.
     fn schedule(&self, el: &ActiveEventLoop, started: Instant, presented: bool) {
         let Some(g) = self.gfx.as_ref() else { return };
-        if self.held || (self.hidden && self.settings.wallpaper.pause_when_hidden) {
-            el.set_control_flow(ControlFlow::Wait);
-            return;
-        }
-        let wait =
-            if presented { self.settings.render.fps_cap.map(|cap| 1.0 / f64::from(cap)) } else { Some(RETRY_SECS) };
+        let cap = match self.pacing() {
+            Pacing::Idle => {
+                el.set_control_flow(ControlFlow::Wait);
+                return;
+            },
+            Pacing::Run(cap) => cap,
+        };
+        let wait = if presented { cap.map(|cap| 1.0 / f64::from(cap)) } else { Some(RETRY_SECS) };
         match wait {
             None => {
                 el.set_control_flow(ControlFlow::Wait);
@@ -607,6 +644,7 @@ impl ApplicationHandler<Event> for App {
                 }
             },
             Event::Hold(held) => self.hold(held),
+            Event::Conditions(conditions) => self.observe(conditions),
             Event::Started(Ok(gfx)) => {
                 gfx.window.request_redraw();
                 let mut overlay = Overlay::new(&gfx.window, gfx.canvas.max_texture_side());
@@ -641,6 +679,15 @@ impl ApplicationHandler<Event> for App {
         if let WindowEvent::KeyboardInput { event: key, is_synthetic, .. } = &event {
             tracing::debug!(key = ?key.physical_key, state = ?key.state, repeat = key.repeat, synthetic = is_synthetic, "key");
         }
+        // Input while paused draws a frame, so a menu it opens shows and then keeps frames coming.
+        let input =
+            matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Touch(_));
+        if input
+            && self.pacing() == Pacing::Idle
+            && let Some(g) = self.gfx.as_ref()
+        {
+            g.window.request_redraw();
+        }
         if let WindowEvent::KeyboardInput { event: key, is_synthetic: false, .. } = &event
             && key.state == ElementState::Pressed
             && let (Some(action), PhysicalKey::Code(code)) = (self.capturing, key.physical_key)
@@ -659,10 +706,9 @@ impl ApplicationHandler<Event> for App {
                 }
             },
             WindowEvent::Occluded(hidden) => {
+                let was = self.pacing();
                 self.hidden = hidden;
-                if !hidden && let Some(g) = self.gfx.as_ref() {
-                    g.window.request_redraw();
-                }
+                self.resume_if_woken(was);
             },
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Focused(focused) => self.focused = focused,
@@ -769,6 +815,7 @@ fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<d
         paused: false,
         hidden: false,
         held: false,
+        conditions: Conditions::default(),
         focused: true,
         touch_hinted: false,
         time: 0.0,

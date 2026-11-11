@@ -6,6 +6,7 @@ mod cli;
 pub mod export;
 mod host_package;
 mod store;
+mod watch;
 #[cfg(target_os = "linux")]
 mod x11;
 
@@ -56,7 +57,10 @@ fn launch(cli: &Cli, matches: &clap::ArgMatches) -> Result<Launch, Error> {
         issues,
         on_window: Some(Box::new({
             let placement = placement.clone();
-            move |window, _remote| place(&window, &placement)
+            move |window, remote| {
+                place(&window, &placement);
+                watch::spawn(&window, remote, matches!(placement, Placement::Embed(_)));
+            }
         })),
         placement,
     })

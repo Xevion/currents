@@ -17,7 +17,7 @@ test:
 
 # Run the viewer end to end in real windows on a virtual X display, never on the desktop.
 test-display:
-    CURRENTS_TEST_DISPLAY=1 xvfb-run -a -s "-screen 0 1920x1080x24" cargo nextest run -p currents-core -p currents --run-ignored only -E 'test(/e2e::|x11::/)'
+    CURRENTS_TEST_DISPLAY=1 xvfb-run -a -s "-screen 0 1920x1080x24" cargo nextest run -p currents-core -p currents --run-ignored only -E 'test(/e2e::|x11::|watch::linux::/)'
 
 # Cross-build the Windows exe with mingw-w64 (the x86_64-w64-mingw32 gcc and binutils).
 windows:

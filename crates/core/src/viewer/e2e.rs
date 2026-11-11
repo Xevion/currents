@@ -175,7 +175,10 @@ fn run(launch: Launch, steps: Vec<Step>) -> Vec<String> {
     script.problems
 }
 
-fn launch(settings: Settings) -> Launch {
+/// The viewer started from `settings`, drawing even when covered: tests share one display,
+/// and another test's full-screen window would otherwise pause this one.
+fn launch(mut settings: Settings) -> Launch {
+    settings.wallpaper.pause_when_hidden = false;
     Launch {
         settings,
         sources: Sources::embedded(),
@@ -487,4 +490,41 @@ fn every_wallpaper_placement_keeps_presenting(
     let problems = run(launch, steps);
     check!(problems.is_empty(), "{problems:#?}");
     drop(parent);
+}
+
+#[test]
+#[ignore = "opens windows; run with `just test-display`"]
+fn a_fullscreen_program_pauses_the_viewer_unless_the_menu_is_up() {
+    let fullscreen = super::Conditions { fullscreen: true, ..super::Conditions::default() };
+    let presented_at_pause = Rc::new(Cell::new(0));
+    let at_pause = Rc::clone(&presented_at_pause);
+    let device_id = DeviceId::dummy();
+    let steps = vec![
+        first_frames(),
+        step("a program goes fullscreen", move |app, _| {
+            at_pause.set(app.presented);
+            remote(app).conditions(fullscreen);
+        })
+        .lasting(Duration::from_millis(600))
+        .expect(move |app| {
+            let since = app.presented - presented_at_pause.get();
+            (since > 2).then(|| format!("{since} frames presented under a fullscreen program"))
+        }),
+        // A click wakes the paused viewer for a frame, and the open menu keeps frames coming.
+        step("open the menu", move |app, el| {
+            app.set_menu(true);
+            pointer(
+                app,
+                el,
+                WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button: MouseButton::Left },
+            );
+        })
+        .expect(menu_is(true)),
+        step("close the menu and leave fullscreen", |app, _| {
+            app.set_menu(false);
+            remote(app).conditions(super::Conditions::default());
+        }),
+    ];
+    let problems = run(launch(Settings::default()), steps);
+    check!(problems.is_empty(), "{problems:#?}");
 }

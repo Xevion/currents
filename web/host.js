@@ -1,6 +1,6 @@
 // Listens for Wallpaper Engine and Lively, which call these globals from the moment the page
 // loads, often before the viewer is up; calls wait until it is. On any other page they are
-// never called.
+// never called. Also passes on the battery status, for the battery pause settings.
 (() => {
   const waiting = [];
   const send = (call) => (window.currents ? call(window.currents) : waiting.push(call));
@@ -25,6 +25,16 @@
     },
     setPaused: hold,
   };
+
+  // Chromium-based hosts and browsers report the battery; elsewhere the viewer assumes mains.
+  navigator.getBattery?.().then(
+    (battery) => {
+      const tell = () => send((viewer) => viewer.power(!battery.charging));
+      tell();
+      battery.addEventListener("chargingchange", tell);
+    },
+    (error) => console.info("currents: no battery status", error),
+  );
 
   window.livelyPropertyListener = property;
   window.livelyWallpaperPlaybackChanged = (data) => {

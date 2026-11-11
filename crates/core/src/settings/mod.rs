@@ -131,11 +131,20 @@ impl Default for CameraTuning {
 }
 
 /// Behaviour that matters once the viewer sits behind a desktop.
+#[expect(clippy::struct_excessive_bools, reason = "independent switches, each a row in the menu and the file")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Wallpaper {
-    /// Stop drawing while the window is fully covered.
+    /// Stop drawing while the window is fully covered or minimised.
     pub pause_when_hidden: bool,
+    /// Stop drawing while another program fills the monitor, as a game or video does.
+    pub pause_under_fullscreen: bool,
+    /// Stop drawing while the computer runs on its battery.
+    pub pause_on_battery: bool,
+    /// Frames per second to hold to on battery, under any other limit; without one, battery
+    /// changes nothing unless it pauses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battery_fps_cap: Option<u32>,
     /// Name the menu key when an unbound key is pressed.
     pub hint: bool,
     /// Holding the right button on the ball opens the menu.
@@ -144,7 +153,14 @@ pub struct Wallpaper {
 
 impl Default for Wallpaper {
     fn default() -> Self {
-        Self { pause_when_hidden: true, hint: true, ball_opener: true }
+        Self {
+            pause_when_hidden: true,
+            pause_under_fullscreen: true,
+            pause_on_battery: false,
+            battery_fps_cap: None,
+            hint: true,
+            ball_opener: true,
+        }
     }
 }
 
@@ -220,6 +236,7 @@ impl Settings {
         let mut s = Self::default();
         s.render.fps_cap = Some(60);
         s.render.max_pixels = Some(3_686_400.0);
+        s.wallpaper.battery_fps_cap = Some(30);
         s
     }
 
@@ -234,6 +251,11 @@ impl Settings {
         r.max_pixels = r.max_pixels.filter(|&v| v > 0.0);
         if let Some(fps) = r.fps_cap.as_mut() {
             clamp_into(fps, &limits::FPS_CAP, "render.fps_cap", &mut issues);
+        }
+        let w = &mut self.wallpaper;
+        w.battery_fps_cap = w.battery_fps_cap.filter(|&v| v > 0);
+        if let Some(fps) = w.battery_fps_cap.as_mut() {
+            clamp_into(fps, &limits::FPS_CAP, "wallpaper.battery_fps_cap", &mut issues);
         }
         if let Some(pixels) = r.max_pixels.as_mut() {
             clamp_into(pixels, &limits::MAX_PIXELS, "render.max_pixels", &mut issues);

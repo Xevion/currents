@@ -4,11 +4,11 @@
 
 mod settings;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use currents_core::hosts::Receiver;
 use currents_core::settings::toml::Value;
-use currents_core::viewer::{self, Hooks, Remote};
+use currents_core::viewer::{self, Conditions, Hooks, Remote};
 use js_sys::Function;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -41,6 +41,7 @@ fn init() {
 pub struct Viewer {
     remote: Remote,
     host: RefCell<Receiver>,
+    conditions: Cell<Conditions>,
 }
 
 #[wasm_bindgen]
@@ -56,6 +57,13 @@ impl Viewer {
     /// Stops drawing while `held`, as a wallpaper host asks while nothing shows the page.
     pub fn hold(&self, held: bool) {
         self.remote.hold(held);
+    }
+
+    /// Whether the device runs on battery, for the battery settings; the page asks the browser.
+    pub fn power(&self, on_battery: bool) {
+        let conditions = Conditions { on_battery, ..self.conditions.get() };
+        self.conditions.set(conditions);
+        self.remote.conditions(conditions);
     }
 
     /// Takes a property from a wallpaper host's panel, under the key the host package gave it.
@@ -100,6 +108,6 @@ pub fn start(canvas: HtmlCanvasElement, on_ready: Function, on_error: Function) 
         })),
     };
     viewer::spawn(settings::from_url(), canvas, hooks)
-        .map(|remote| Viewer { remote, host: RefCell::default() })
+        .map(|remote| Viewer { remote, host: RefCell::default(), conditions: Cell::default() })
         .map_err(|e| JsError::new(&e.to_string()))
 }

@@ -476,7 +476,28 @@ fn motion(ui: &mut Ui, settings: &mut Settings, commands: &mut Vec<Command>) {
 fn wallpaper(ui: &mut Ui, settings: &mut Settings) {
     rows(ui, "wallpaper", |ui| {
         let w = &mut settings.wallpaper;
-        flag(ui, "Pause when hidden", &mut w.pause_when_hidden, "Stop drawing while the window is covered.");
+        flag(
+            ui,
+            "Pause when hidden",
+            &mut w.pause_when_hidden,
+            "Stop drawing while the window is covered or minimised.",
+        );
+        flag(
+            ui,
+            "Pause under fullscreen",
+            &mut w.pause_under_fullscreen,
+            "Stop drawing while another program fills the monitor.",
+        );
+        flag(ui, "Pause on battery", &mut w.pause_on_battery, "Stop drawing while the computer runs on battery.");
+        if !w.pause_on_battery {
+            limit(
+                ui,
+                ("Limit on battery", "Hold to a lower frame rate while on battery.", "Battery frame rate"),
+                &mut w.battery_fps_cap,
+                DEFAULT_FPS,
+                &Spec { suffix: " fps", ..Spec::new(limits::FPS_CAP) },
+            );
+        }
         flag(ui, "Hint at the menu key", &mut w.hint, "Name the menu key when an unbound key is pressed.");
         flag(
             ui,
