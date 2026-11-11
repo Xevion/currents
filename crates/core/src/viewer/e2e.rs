@@ -2,7 +2,7 @@
 //! display and open windows on it, so they run only under `just test-display`, which gives
 //! them a virtual one; they refuse to run without it rather than open windows on a desktop.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ use winit::window::WindowId;
 
 use super::opener::{BALL_C, BALL_R};
 use super::testing::extremes;
-use super::{App, Event, Hooks, Launch, Remote, app};
+use super::{App, Event, Failure, Hooks, Launch, Remote, Stage, app};
 use crate::settings::toml::{self, Value};
 use crate::settings::{Settings, limits};
 use crate::shaders::Sources;
@@ -147,12 +147,17 @@ impl ApplicationHandler<Event> for Script {
 
 /// Runs the viewer from `launch` through `steps` in a real window; returns every problem seen.
 fn run(launch: Launch, steps: Vec<Step>) -> Vec<String> {
+    run_with(launch, Hooks::default(), steps)
+}
+
+/// As `run`, with the callbacks and choices a page would give.
+fn run_with(launch: Launch, hooks: Hooks, steps: Vec<Step>) -> Vec<String> {
     assert!(
         std::env::var_os(DISPLAY_GUARD).is_some(),
         "opens real windows; run it with `just test-display`, which gives it a virtual display"
     );
     let event_loop = EventLoop::<Event>::with_user_event().with_any_thread(true).build().expect("an event loop");
-    let app = app(&event_loop, launch, Hooks::default(), Box::new(pollster::block_on));
+    let app = app(&event_loop, launch, hooks, Box::new(pollster::block_on));
     let mut script = Script { app, steps: steps.into(), current: None, problems: Vec::new() };
     let mut event_loop = event_loop;
     let deadline = Instant::now() + STEP_TIMEOUT * 4;
@@ -387,6 +392,54 @@ fn shaders_that_do_not_compile_still_present_the_menu() {
     // The steps above expect the fault, so only problems other than it count.
     let problems: Vec<_> = event_loop_problems.into_iter().filter(|p| !p.contains("drawing stopped")).collect();
     check!(problems.is_empty(), "{problems:#?}");
+}
+
+/// What a strict start told the page: whether it was ready, and every failure.
+type Told = (Rc<Cell<bool>>, Rc<RefCell<Vec<Failure>>>);
+
+/// Hooks for a strict start that record what the viewer told the page.
+fn strict_hooks() -> (Hooks, Told) {
+    let (ready, failures) = (Rc::new(Cell::new(false)), Rc::new(RefCell::new(Vec::new())));
+    let hooks = Hooks {
+        on_ready: Some(Box::new({
+            let ready = Rc::clone(&ready);
+            move || ready.set(true)
+        })),
+        on_error: Some(Box::new({
+            let failures = Rc::clone(&failures);
+            move |failure| failures.borrow_mut().push(failure)
+        })),
+        strict_start: true,
+        ..Hooks::default()
+    };
+    (hooks, (ready, failures))
+}
+
+#[test]
+#[ignore = "opens windows; run with `just test-display`"]
+fn a_strict_start_stops_over_shaders_that_do_not_compile() {
+    let mut launch = launch(Settings::default());
+    launch.sources.shade = "this is not wgsl".to_owned();
+    let (hooks, (ready, failures)) = strict_hooks();
+    let problems = run_with(launch, hooks, vec![first_frames()]);
+    check!(problems.iter().any(|p| p.contains("exited")), "{problems:#?}");
+    check!(!ready.get(), "told the page it was ready");
+    let failures = failures.borrow();
+    assert!(let [Failure { stage: Stage::Shaders, drawn: false, .. }] = failures.as_slice(), "{failures:#?}");
+}
+
+#[test]
+#[ignore = "opens windows; run with `just test-display`"]
+fn a_strict_start_tells_the_page_once_the_first_frame_is_done() {
+    let (hooks, (ready, failures)) = strict_hooks();
+    let probe = Rc::clone(&ready);
+    let steps = vec![
+        first_frames(),
+        step("ready", |_, _| {}).expect(move |_| (!probe.get()).then(|| "never ready".to_owned())),
+    ];
+    let problems = run_with(launch(Settings::default()), hooks, steps);
+    check!(problems.is_empty(), "{problems:#?}");
+    check!(failures.borrow().is_empty(), "{:#?}", failures.borrow());
 }
 
 fn remote(app: &App) -> Remote {

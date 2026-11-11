@@ -16,7 +16,7 @@ pub enum Error {
 
 const TITLE: &str = "Currents";
 const DESCRIPTION: &str = "Flowing stripes parting around a chrome ball, simulated and rendered live on your GPU.";
-/// The page and its still, as `web/build.py --package` lays them out.
+/// The page and its still, as `web/build.py wallpaper` lays them out.
 const PAGE: &str = "index.html";
 const PREVIEW: &str = "preview.jpg";
 /// Lively's number for a web page wallpaper, which it reads whether or not it writes names.
@@ -95,7 +95,7 @@ pub(crate) fn files(host: Host) -> Vec<(&'static str, Value)> {
     }
 }
 
-/// Writes `host`'s files into `dir`, beside the page `web/build.py --package` put there.
+/// Writes `host`'s files into `dir`, beside the page `web/build.py wallpaper` put there.
 pub(crate) fn run(host: Host, dir: &Path) -> Result<(), Error> {
     for (name, value) in files(host) {
         let text = serde_json::to_string_pretty(&value).expect("JSON values always serialise") + "\n";

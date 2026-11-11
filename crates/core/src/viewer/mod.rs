@@ -14,6 +14,7 @@ mod ui;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gfx::Gfx;
 use opener::{Opener, on_ball};
@@ -55,6 +56,79 @@ pub enum Error {
     Gpu { source: gpu::Error },
     #[snafu(display("the graphics adapter does not support the window's surface"))]
     NoSurfaceConfig,
+}
+
+impl Error {
+    pub const fn stage(&self) -> Stage {
+        match self {
+            Self::EventLoop { .. } | Self::RunEventLoop { .. } | Self::CreateWindow { .. } => Stage::Window,
+            Self::CreateSurface { .. } | Self::NoSurfaceConfig => Stage::Surface,
+            Self::Gpu { .. } => Stage::Device,
+        }
+    }
+}
+
+/// Where in starting or running the viewer something failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+pub enum Stage {
+    Window,
+    Surface,
+    /// Finding an adapter or opening a device on it.
+    Device,
+    Shaders,
+    /// An error the device raised outside any scope the viewer opened.
+    Validation,
+    Lost,
+}
+
+/// Why the viewer stopped, for the page to act on.
+#[derive(Clone, Debug)]
+pub struct Failure {
+    pub stage: Stage,
+    /// One line for a person: what failed and what lay at the bottom of it.
+    pub message: String,
+    /// Everything known, for diagnostics.
+    pub detail: String,
+    /// Whether a frame had been drawn and finished on the device first.
+    pub drawn: bool,
+}
+
+/// Longest a failure's one-line message gets before it is cut.
+const MESSAGE_CHARS: usize = 240;
+
+/// The first line of `text`, without the wrapping a JavaScript error picks up on its way
+/// through `JsValue`'s debug form, and cut to a readable length.
+fn one_line(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    let line = line.strip_prefix("JsValue(").unwrap_or(line);
+    let line = line.strip_prefix("Error: ").unwrap_or(line);
+    match line.char_indices().nth(MESSAGE_CHARS) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line.to_owned(),
+    }
+}
+
+/// `error` in one line: what failed and, beneath it, the cause the chain bottoms out in.
+fn summary(error: &dyn std::error::Error) -> String {
+    let outer = one_line(&error.to_string());
+    let root = std::iter::successors(error.source(), |e| e.source()).last().map(|e| one_line(&e.to_string()));
+    match root {
+        Some(root) if !root.is_empty() && root != outer => format!("{outer}: {root}"),
+        _ => outer,
+    }
+}
+
+/// What the viewer found to draw with, for the page's diagnostics.
+#[derive(Clone, Debug)]
+pub struct GpuReport {
+    pub adapter: String,
+    pub backend: String,
+    pub driver: String,
+    pub float32_filterable: bool,
+    pub timestamps: bool,
+    pub max_texture_side: u32,
+    pub surface_format: String,
 }
 
 /// Where the viewer keeps settings between runs. The viewer calls `save` a moment after the
@@ -104,13 +178,25 @@ pub enum Placement {
 /// What a page shares settings with; the menu offers Copy link only when there is one.
 pub type Share = Box<dyn FnMut(&Settings)>;
 
-/// Page callbacks: `on_ready` after the first frame, `on_error` with why the viewer stopped.
+/// What a page runs once the device is open.
+pub type OnGpu = Box<dyn FnOnce(&GpuReport)>;
+
+/// What a page gives the viewer: callbacks, and how strictly to treat a bad start.
 #[derive(Default)]
 pub struct Hooks {
+    /// Runs once the first frame has finished on the device without a fault.
     pub on_ready: Option<Box<dyn FnOnce()>>,
-    pub on_error: Option<Box<dyn FnMut(String)>>,
+    /// Runs when the viewer stops, and when a running viewer loses its device.
+    pub on_error: Option<Box<dyn FnMut(Failure)>>,
+    /// Runs once the device is open, with what it is.
+    pub on_gpu: Option<OnGpu>,
     /// Takes the settings the menu's Copy link button shares.
     pub share: Option<Share>,
+    /// Shown as a toast once the first frame is done.
+    pub notice: Option<String>,
+    /// Fails instead of drawing black under the menu when a fault comes before the first
+    /// frame is done, for a page that has another backend to try.
+    pub strict_start: bool,
 }
 
 /// A future the platform drives to completion: native blocks on it, the web spawns it.
@@ -126,6 +212,8 @@ enum Event {
     Hold(bool),
     /// What the platform reports about the viewer's surroundings.
     Conditions(Conditions),
+    /// Ends the viewer and releases its device, for a page replacing it.
+    Stop,
 }
 
 /// Changes a running viewer from outside its event loop, as a page or wallpaper host does.
@@ -147,6 +235,11 @@ impl Remote {
     /// Tells the viewer what the platform sees around it, which the pause settings act on.
     pub fn conditions(&self, conditions: Conditions) {
         self.send(Event::Conditions(conditions));
+    }
+
+    /// Ends the viewer and releases its graphics device; nothing it was sent after takes effect.
+    pub fn stop(&self) {
+        self.send(Event::Stop);
     }
 
     fn send(&self, event: Event) {
@@ -215,6 +308,12 @@ struct App {
     started_at: Instant,
     /// Frames presented so far.
     presented: u64,
+    /// Set by the device once the first frame at the window's size is done.
+    first_done: Arc<AtomicBool>,
+    /// Whether that frame has been submitted and is being watched for.
+    first_sent: bool,
+    /// Whether the first frame finished without a fault and the page was told.
+    ready: bool,
     /// The device fault last shown to the person, so each one is announced once.
     announced_fault: Option<String>,
     failure: Option<Error>,
@@ -226,11 +325,51 @@ fn frame_uniforms(settings: &Settings, camera: &Camera, time: f64, gfx: &Gfx) ->
 
 impl App {
     fn fail(&mut self, el: &ActiveEventLoop, error: Error) {
-        if let Some(on_error) = self.hooks.on_error.as_mut() {
-            on_error(snafu::Report::from_error(&error).to_string());
-        }
+        self.report(error.stage(), summary(&error), snafu::Report::from_error(&error).to_string());
         self.failure = Some(error);
         el.exit();
+    }
+
+    fn report(&mut self, stage: Stage, message: String, detail: String) {
+        if let Some(on_error) = self.hooks.on_error.as_mut() {
+            on_error(Failure { stage, message, detail, drawn: self.ready });
+        }
+    }
+
+    /// Ends the viewer over a fault, for a page that would rather try another backend.
+    fn fail_fault(&mut self, el: &ActiveEventLoop, stage: Stage, detail: String) {
+        tracing::warn!(?stage, %detail, "a fault before the first frame was done; stopping");
+        self.report(stage, one_line(&detail), detail);
+        self.stop(el);
+    }
+
+    fn stop(&mut self, el: &ActiveEventLoop) {
+        self.overlay = None;
+        if let Some(g) = self.gfx.take() {
+            g.canvas.device().destroy();
+        }
+        el.exit();
+    }
+
+    /// Tells the page the viewer is up once the first frame is done on the device, or stops
+    /// over a fault found before then when the start is strict.
+    fn check_start(&mut self, el: &ActiveEventLoop) {
+        let failure = self.gfx.as_ref().and_then(|g| g.canvas.failure());
+        if self.hooks.strict_start
+            && let Some((stage, message)) = failure
+        {
+            return self.fail_fault(el, stage, message);
+        }
+        if self.first_done.load(Ordering::Acquire) {
+            self.ready = true;
+            // Shown now rather than at startup, which a slow first frame would outlast.
+            if let (Some(notice), Some(overlay)) = (self.hooks.notice.take(), self.overlay.as_mut()) {
+                overlay.toast(notice, true);
+            }
+            if let Some(on_ready) = self.hooks.on_ready.take() {
+                on_ready();
+            }
+        }
     }
 
     /// Advances the clock to `now`; returns the seconds since the last frame.
@@ -479,11 +618,17 @@ impl App {
         }
     }
 
-    /// Tells the person once about a fault that stopped the shading.
+    /// Tells the person once about a fault that stopped the shading, and the page about a lost device.
     fn announce_fault(&mut self) {
-        let fault = self.gfx.as_ref().and_then(|g| g.canvas.fault());
+        let failure = self.gfx.as_ref().and_then(|g| g.canvas.failure());
+        let fault = failure.as_ref().map(|(_, message)| message.clone());
         if fault == self.announced_fault {
             return;
+        }
+        if let Some((Stage::Lost, detail)) = failure
+            && self.ready
+        {
+            self.report(Stage::Lost, one_line(&detail), detail);
         }
         if let (Some(fault), Some(overlay)) = (&fault, self.overlay.as_mut()) {
             overlay.toast(format!("Drawing stopped: {fault}. Change a setting to try again."), true);
@@ -527,9 +672,23 @@ impl App {
             if self.presented == 1 {
                 tracing::info!(elapsed_ms = self.started_at.elapsed().as_millis(), "first frame presented");
             }
+            // A page's canvas reports no size until it is first measured, and a frame drawn at
+            // a pixel says nothing about how the full-size ones will go.
+            let sized = g.canvas.physical.width > 1 && g.canvas.physical.height > 1;
+            if sized && !self.first_sent {
+                self.first_sent = true;
+                let (done, window) = (Arc::clone(&self.first_done), Arc::clone(&g.window));
+                g.canvas.on_drawn(move || {
+                    done.store(true, Ordering::Release);
+                    window.request_redraw();
+                });
+            }
             self.update_title(now, self.passes);
-            if let Some(on_ready) = self.hooks.on_ready.take() {
-                on_ready();
+            if !self.ready {
+                self.check_start(el);
+                if self.gfx.is_none() {
+                    return;
+                }
             }
         }
         self.schedule(el, now, presented);
@@ -661,8 +820,16 @@ impl ApplicationHandler<Event> for App {
             },
             Event::Hold(held) => self.hold(held),
             Event::Conditions(conditions) => self.observe(conditions),
+            Event::Stop => {
+                tracing::info!(ready = self.ready, "the page stopped the viewer");
+                self.stop(el);
+            },
             Event::Started(Ok(gfx)) => {
                 gfx.window.request_redraw();
+                tracing::info!(report = ?gfx.report, "graphics ready");
+                if let Some(on_gpu) = self.hooks.on_gpu.take() {
+                    on_gpu(&gfx.report);
+                }
                 let mut overlay = Overlay::new(&gfx.window, gfx.canvas.max_texture_side());
                 if !self.issues.is_empty() {
                     let n = self.issues.len();
@@ -850,6 +1017,9 @@ fn app(event_loop: &EventLoop<Event>, launch: Launch, hooks: Hooks, spawn: Box<d
         touches: Touches::default(),
         title: FrameCounter::new(now),
         presented: 0,
+        first_done: Arc::default(),
+        first_sent: false,
+        ready: false,
         announced_fault: None,
         started_at: now,
         failure: None,
@@ -877,4 +1047,42 @@ pub fn spawn(launch: Launch, canvas: web_sys::HtmlCanvasElement, hooks: Hooks) -
     app.canvas = Some(canvas);
     event_loop.spawn_app(app);
     Ok(remote)
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::{one_line, summary};
+
+    #[derive(Debug, snafu::Snafu)]
+    enum Outer {
+        #[snafu(display("could not open a graphics device"))]
+        Open { source: Inner },
+    }
+
+    #[derive(Debug, snafu::Snafu)]
+    #[snafu(display("{text}"))]
+    struct Inner {
+        text: String,
+    }
+
+    #[test]
+    fn a_javascript_error_loses_its_wrapping_and_stack() {
+        let wrapped = "JsValue(Error: the device was refused\nError: the device was refused\n    at requestDevice";
+        check!(one_line(wrapped) == "the device was refused");
+    }
+
+    #[test]
+    fn a_long_line_is_cut() {
+        let line = one_line(&"x".repeat(1000));
+        check!(line.chars().count() == super::MESSAGE_CHARS + 3);
+        check!(line.ends_with("..."));
+    }
+
+    #[test]
+    fn a_summary_names_the_failure_and_the_cause_beneath_it() {
+        let error = Outer::Open { source: Inner { text: "JsValue(Error: refused\n  at x)".to_owned() } };
+        check!(summary(&error) == "could not open a graphics device: refused");
+    }
 }

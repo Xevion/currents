@@ -143,7 +143,7 @@ pub(crate) enum Command {
     Render(RenderArgs),
     /// Time the GPU passes over views and sizes without opening a window
     Bench(BenchArgs),
-    /// Write a wallpaper host's files (we or lively) into a page `web/build.py --package` laid out
+    /// Write a wallpaper host's files (we or lively) into a page `web/build.py wallpaper` laid out
     HostPackage(HostPackageArgs),
 }
 

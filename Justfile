@@ -14,6 +14,7 @@ lint:
 
 test:
     cargo nextest run --workspace
+    cd web && bun test
 
 # Run the viewer end to end in real windows on a virtual X display, never on the desktop.
 test-display:
@@ -58,9 +59,9 @@ profile *args:
 
 wasm_features := "--enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types"
 
-# Build the WebGPU and WebGL2 bundles and assemble dist/; mise supplies wasm-bindgen and wasm-opt.
+# Build the WebGPU and WebGL2 bundles and assemble the site in dist/; mise supplies bun, wasm-bindgen and wasm-opt.
 web: _web-bundles
-    python3 -I web/build.py
+    python3 -I web/build.py site
 
 _web-bundles:
     mise install --quiet
@@ -75,12 +76,12 @@ _web-bundle backend:
 
 # Package the viewer as a Wallpaper Engine web wallpaper in out/we; import its project.json.
 we: _web-bundles
-    python3 -I web/build.py --package out/we
+    python3 -I web/build.py wallpaper out/we
     cargo run -q -p currents -- host-package we out/we
 
 # Package the viewer as a Lively web wallpaper in out/lively; add the folder or zip it.
 lively: _web-bundles
-    python3 -I web/build.py --package out/lively
+    python3 -I web/build.py wallpaper out/lively
     cargo run -q -p currents -- host-package lively out/lively
 
 # Build dist/ and upload it as an assets-only Worker served at currents.xevion.dev.

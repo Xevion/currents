@@ -1,0 +1,225 @@
+:root {
+  --bg: #08060c;
+  --text: #f2eef8;
+  --muted: #b9adc9;
+  --accent: #e8283b;
+  --panel: rgb(14 10 20 / 0.72);
+  --line: rgb(255 255 255 / 0.12);
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  overscroll-behavior: none;
+}
+
+.stage {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  outline: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: end center;
+  padding: 16px 16px max(10vh, 32px);
+  overflow: auto;
+  color: var(--text);
+  font: 15px/1.5 var(--sans);
+  background: var(--bg);
+  transition: opacity 0.45s ease;
+}
+
+/* The picture the first frame will show, blurred, so loading looks like the page arriving. */
+#screen::before {
+  content: "";
+  position: fixed;
+  inset: -10%;
+  background: url("%%POSTER%%") center / cover no-repeat;
+  filter: blur(40px) saturate(1.1);
+  opacity: 0.85;
+  animation: breathe 3.2s ease-in-out infinite alternate;
+}
+
+#screen[data-phase="ready"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#screen[data-phase="failed"] {
+  place-items: center;
+}
+
+#screen[data-phase="failed"]::before {
+  opacity: 0.35;
+  animation: none;
+}
+
+#screen[hidden] {
+  display: none;
+}
+
+@keyframes breathe {
+  from {
+    opacity: 0.7;
+  }
+  to {
+    opacity: 0.95;
+  }
+}
+
+.panel {
+  position: relative;
+  width: min(100%, 30rem);
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-sizing: border-box;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+#screen-status {
+  margin: 0;
+  color: var(--muted);
+}
+
+#screen[data-phase="failed"] #screen-status,
+#screen[data-phase="failed"] progress {
+  display: none;
+}
+
+progress {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 12px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--line);
+  appearance: none;
+  overflow: hidden;
+}
+
+progress[hidden] {
+  display: none;
+}
+
+progress::-webkit-progress-bar {
+  background: var(--line);
+}
+
+progress::-webkit-progress-value {
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
+#screen-failure[hidden] {
+  display: none;
+}
+
+#failure-summary {
+  margin: 0 0 10px;
+}
+
+#failure-list {
+  margin: 0 0 14px;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#failure-list strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+button {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  background: rgb(255 255 255 / 0.06);
+  cursor: pointer;
+}
+
+button:first-child {
+  border-color: transparent;
+  background: var(--accent);
+}
+
+button:hover {
+  filter: brightness(1.15);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+details {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+summary {
+  cursor: pointer;
+}
+
+pre {
+  max-height: 40vh;
+  margin: 8px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 8px;
+  font: 0.75rem/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgb(0 0 0 / 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #screen,
+  #screen::before {
+    transition: none;
+    animation: none;
+  }
+}

@@ -8,28 +8,63 @@ use std::cell::{Cell, RefCell};
 
 use currents_core::hosts::Receiver;
 use currents_core::settings::toml::Value;
-use currents_core::viewer::{self, Conditions, Hooks, Remote};
-use js_sys::Function;
+use currents_core::viewer::{self, Conditions, Failure, GpuReport, Hooks, Remote};
+use js_sys::{Function, Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 thread_local! {
     static ON_ERROR: RefCell<Option<Function>> = const { RefCell::new(None) };
+    /// Whether the viewer has told the page it is up, which a crash report carries.
+    static READY: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Passes a failure description to the page's error handler, if one was registered.
-fn report(message: &str) {
+/// Hands a failure to the page's error handler, if one was registered.
+fn report(stage: &str, message: &str, detail: &str, drawn: bool) {
     let handler = ON_ERROR.with(|h| h.borrow().clone());
-    if let Some(handler) = handler {
-        let _ = handler.call1(&JsValue::NULL, &JsValue::from_str(message));
+    let Some(handler) = handler else { return };
+    let failure = object(&[
+        ("stage", JsValue::from_str(stage)),
+        ("message", JsValue::from_str(message)),
+        ("detail", JsValue::from_str(detail)),
+        ("drawn", JsValue::from_bool(drawn)),
+    ]);
+    if let Err(error) = handler.call1(&JsValue::NULL, &failure) {
+        log::warn!("the page's error handler threw: {error:?}");
     }
+}
+
+fn object(fields: &[(&str, JsValue)]) -> Object {
+    let object = Object::new();
+    for (key, value) in fields {
+        let _ = Reflect::set(&object, &JsValue::from_str(key), value);
+    }
+    object
+}
+
+fn gpu_object(report: &GpuReport) -> Object {
+    object(&[
+        ("adapter", JsValue::from_str(&report.adapter)),
+        ("backend", JsValue::from_str(&report.backend)),
+        ("driver", JsValue::from_str(&report.driver)),
+        ("float32Filterable", JsValue::from_bool(report.float32_filterable)),
+        ("timestamps", JsValue::from_bool(report.timestamps)),
+        ("maxTextureSide", JsValue::from(report.max_texture_side)),
+        ("surfaceFormat", JsValue::from_str(&report.surface_format)),
+    ])
 }
 
 #[wasm_bindgen(start)]
 fn init() {
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
-        report("The renderer crashed.");
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        report("crash", &format!("the renderer crashed: {what}"), &info.to_string(), READY.get());
     }));
     if console_log::init_with_level(settings::log_level()).is_err() {
         log::warn!("logger already installed");
@@ -64,6 +99,11 @@ impl Viewer {
         let conditions = Conditions { on_battery, ..self.conditions.get() };
         self.conditions.set(conditions);
         self.remote.conditions(conditions);
+    }
+
+    /// Ends the viewer and releases its graphics device, before the page removes its canvas.
+    pub fn stop(&self) {
+        self.remote.stop();
     }
 
     /// Takes a property from a wallpaper host's panel, under the key the host package gave it.
@@ -113,24 +153,53 @@ fn share(settings: &currents_core::settings::Settings) -> Result<(), JsValue> {
     Ok(())
 }
 
-/// Starts the viewer on `canvas`. `on_ready()` runs after the first frame and `on_error(message)`
-/// on any failure that stops it.
+/// A function the page passed under `key` in the start options, if it passed one.
+fn callback(options: &JsValue, key: &str) -> Option<Function> {
+    Reflect::get(options, &JsValue::from_str(key)).ok()?.dyn_into().ok()
+}
+
+fn call(function: &Function, argument: &JsValue) {
+    if let Err(error) = function.call1(&JsValue::NULL, argument) {
+        log::warn!("a page callback threw: {error:?}");
+    }
+}
+
+/// Starts the viewer on `canvas`. `options` carries the page's callbacks and choices:
+///
+/// - `onReady()` once the first frame is done on the device;
+/// - `onError({stage, message, drawn})` when the viewer stops, or a running one loses its device;
+/// - `onGpu({adapter, backend, ...})` once the device is open;
+/// - `notice`, text shown as a toast once the viewer is up;
+/// - `share`, true to offer the menu's Copy link button;
+/// - `strict`, true to fail over a fault before the first frame instead of drawing black.
 #[wasm_bindgen]
-pub fn start(canvas: HtmlCanvasElement, on_ready: Function, on_error: Function) -> Result<Viewer, JsError> {
-    ON_ERROR.with(|h| *h.borrow_mut() = Some(on_error));
+pub fn start(canvas: HtmlCanvasElement, options: &JsValue) -> Result<Viewer, JsError> {
+    let flag = |key: &str| Reflect::get(options, &JsValue::from_str(key)).is_ok_and(|v| v.is_truthy());
+    ON_ERROR.with(|h| *h.borrow_mut() = callback(options, "onError"));
+    READY.set(false);
+    let on_ready = callback(options, "onReady");
+    let on_gpu = callback(options, "onGpu");
     let hooks = Hooks {
         on_ready: Some(Box::new(move || {
-            let _ = on_ready.call0(&JsValue::NULL);
-        })),
-        on_error: Some(Box::new(|message| {
-            log::error!("{message}");
-            report(&message);
-        })),
-        share: Some(Box::new(|settings| {
-            if let Err(error) = share(settings) {
-                log::warn!("could not share the settings: {error:?}");
+            READY.set(true);
+            if let Some(on_ready) = on_ready {
+                call(&on_ready, &JsValue::UNDEFINED);
             }
         })),
+        on_error: Some(Box::new(|Failure { stage, message, detail, drawn }| {
+            log::error!("{detail}");
+            report(stage.into(), &message, &detail, drawn);
+        })),
+        on_gpu: on_gpu.map(|on_gpu| -> viewer::OnGpu { Box::new(move |gpu| call(&on_gpu, &gpu_object(gpu))) }),
+        share: flag("share").then(|| -> viewer::Share {
+            Box::new(|settings| {
+                if let Err(error) = share(settings) {
+                    log::warn!("could not share the settings: {error:?}");
+                }
+            })
+        }),
+        notice: Reflect::get(options, &JsValue::from_str("notice")).ok().and_then(|v| v.as_string()),
+        strict_start: flag("strict"),
     };
     viewer::spawn(settings::from_url(), canvas, hooks)
         .map(|remote| Viewer { remote, host: RefCell::default(), conditions: Cell::default() })

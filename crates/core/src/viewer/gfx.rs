@@ -8,7 +8,7 @@ use winit::window::Window;
 use super::blit::Blit;
 use super::scale::RenderScale;
 use super::ui::{Painted, Shading};
-use super::{CreateSurfaceSnafu, Error, GpuSnafu, NoSurfaceConfigSnafu};
+use super::{CreateSurfaceSnafu, Error, GpuReport, GpuSnafu, NoSurfaceConfigSnafu, Stage};
 use crate::camera::Viewport;
 use crate::gpu::{self, Gpu};
 use crate::params::ParamBlock;
@@ -19,14 +19,14 @@ use crate::shaders::Sources;
 /// How much wider than the frame the field pass's key texture can grow.
 const KEY_HEADROOM: f32 = 1.5;
 
-/// The first error the device reported since the canvas last tried afresh.
-type Fault = Arc<Mutex<Option<String>>>;
+/// The first error the device reported since the canvas last tried afresh, and where it came from.
+type Fault = Arc<Mutex<Option<(Stage, String)>>>;
 
-fn record(fault: &Fault, message: String) {
+fn record(fault: &Fault, stage: Stage, message: String) {
     let mut slot = fault.lock().unwrap_or_else(PoisonError::into_inner);
     if slot.is_none() {
-        error!(error = %message, "graphics error; drawing black under the menu until settings change");
-        *slot = Some(message);
+        error!(error = %message, ?stage, "graphics error; drawing black under the menu until settings change");
+        *slot = Some((stage, message));
     }
 }
 
@@ -78,13 +78,14 @@ impl Canvas {
         let egui = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
         let internal = internal.pop().await;
         if let Some(e) = internal.or(validation.pop().await) {
-            record(&fault, format!("the shaders did not compile on this device: {e}"));
+            record(&fault, Stage::Shaders, format!("the shaders did not compile on this device: {e}"));
         }
         let handler = fault.clone();
-        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| record(&handler, e.to_string())));
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| record(&handler, Stage::Validation, e.to_string())));
         let lost = fault.clone();
         device.set_device_lost_callback(move |reason, message| {
-            record(&lost, format!("the graphics device was lost ({reason:?}): {message}"));
+            warn!(?reason, %message, "graphics device lost");
+            record(&lost, Stage::Lost, format!("the graphics device was lost: {}", message.trim_end_matches('.')));
         });
         let canvas = Self {
             device,
@@ -119,13 +120,23 @@ impl Canvas {
 
     /// The error that stopped shading, if one has.
     pub(crate) fn fault(&self) -> Option<String> {
+        self.failure().map(|(_, message)| message)
+    }
+
+    /// The error that stopped shading and where it came from.
+    pub(crate) fn failure(&self) -> Option<(Stage, String)> {
         self.fault.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Runs `done` once the device has finished all work submitted so far.
+    pub(crate) fn on_drawn(&self, done: impl FnOnce() + Send + 'static) {
+        self.queue.on_submitted_work_done(done);
     }
 
     /// Stops shading as a device error would.
     #[cfg(test)]
     pub(crate) fn set_fault(&self, message: &str) {
-        record(&self.fault, message.to_owned());
+        record(&self.fault, Stage::Validation, message.to_owned());
     }
 
     /// The longest frame side the device has room for, leaving the field pass's key, which
@@ -229,7 +240,7 @@ impl Canvas {
             );
         }
         let cleared = self.fault.lock().unwrap_or_else(PoisonError::into_inner).take();
-        if let Some(fault) = cleared {
+        if let Some((_, fault)) = cleared {
             info!(%fault, "settings changed; shading again");
         }
         self.drawn = None;
@@ -363,6 +374,7 @@ pub(crate) struct Gfx {
     pub(crate) canvas: Canvas,
     /// Frames in a row the surface has not given; reset by the next it does.
     pub(crate) failed: u32,
+    pub(crate) report: GpuReport,
 }
 
 impl Gfx {
@@ -378,6 +390,7 @@ impl Gfx {
     ) -> Result<Self, Error> {
         let surface = instance.create_surface(window.clone()).context(CreateSurfaceSnafu)?;
         let Gpu { adapter, device, queue } = gpu::request(&instance, Some(&surface)).await.context(GpuSnafu)?;
+        let details = adapter.get_info();
         let caps = surface.get_capabilities(&adapter);
         let mut config = surface.get_default_config(&adapter, 1, 1).context(NoSurfaceConfigSnafu)?;
         config.format = surface_format(&caps.formats).unwrap_or(config.format);
@@ -394,7 +407,21 @@ impl Gfx {
             offered = ?caps.formats,
             "surface ready"
         );
-        Ok(Self { window, instance, surface, config, canvas, failed: 0 })
+        let features = canvas.device().features();
+        let report = GpuReport {
+            adapter: details.name,
+            backend: details.backend.to_string(),
+            driver: [details.driver, details.driver_info]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+            float32_filterable: features.contains(wgpu::Features::FLOAT32_FILTERABLE),
+            timestamps: features.contains(wgpu::Features::TIMESTAMP_QUERY),
+            max_texture_side: canvas.device().limits().max_texture_dimension_2d,
+            surface_format: format!("{:?}", config.format),
+        };
+        Ok(Self { window, instance, surface, config, canvas, failed: 0, report })
     }
 
     /// Brings the surface to the window's size. A surface the window's size is the only kind
